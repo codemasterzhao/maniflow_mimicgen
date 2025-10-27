@@ -508,53 +508,66 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         this_n_point_cloud = this_n_point_cloud[..., :3]
 
         """Get flow and consistency targets"""
-        flow_batchsize = int(batch_size * self.flow_batch_ratio)
-        consistency_batchsize = int(batch_size * self.consistency_batch_ratio)
-    
+        # If EMA is disabled, only use flow matching (no consistency distillation)
+        use_consistency = ema_model is not None
+
+        if use_consistency:
+            flow_batchsize = int(batch_size * self.flow_batch_ratio)
+            consistency_batchsize = int(batch_size * self.consistency_batch_ratio)
+        else:
+            # Use entire batch for flow matching when EMA is disabled
+            flow_batchsize = batch_size
+            consistency_batchsize = 0
 
         # Get flow velocity targets
-        flow_target_dict = self.get_flow_velocity(nactions[:flow_batchsize], 
+        flow_target_dict = self.get_flow_velocity(nactions[:flow_batchsize],
                                                     vis_cond=vis_cond[:flow_batchsize],
                                                     lang_cond=lang_cond[:flow_batchsize] if lang_cond is not None else None)
         v_flow_pred = self.model(
-            sample=flow_target_dict['x_t'], 
+            sample=flow_target_dict['x_t'],
             timestep=flow_target_dict['t'].squeeze(),
             target_t=flow_target_dict['target_t'].squeeze(),
             vis_cond=vis_cond[:flow_batchsize],
             lang_cond=flow_target_dict['lang_cond'][:flow_batchsize] if lang_cond is not None else None)
         v_flow_pred_magnitude = torch.sqrt(torch.mean(v_flow_pred ** 2)).item()
 
-        # Get consistency velocity targets
-        consistency_target_dict = self.get_consistency_velocity(nactions[flow_batchsize:flow_batchsize+consistency_batchsize],
-                                                                        vis_cond=vis_cond[flow_batchsize:flow_batchsize+consistency_batchsize],
-                                                                        lang_cond=lang_cond[flow_batchsize:flow_batchsize+consistency_batchsize] if lang_cond is not None else None,
-                                                                        ema_model=ema_model
-                                                                        )
-        v_ct_pred = self.model(
-            sample=consistency_target_dict['x_t'], 
-            timestep=consistency_target_dict['t'].squeeze(),
-            target_t=consistency_target_dict['target_t'].squeeze(),
-            vis_cond=vis_cond[flow_batchsize:flow_batchsize+consistency_batchsize],
-            lang_cond=lang_cond[flow_batchsize:flow_batchsize+consistency_batchsize] if lang_cond is not None else None,
-            )
-        v_ct_pred_magnitude = torch.sqrt(torch.mean(v_ct_pred ** 2)).item()
+        # Get consistency velocity targets only if EMA is enabled
+        if use_consistency:
+            consistency_target_dict = self.get_consistency_velocity(nactions[flow_batchsize:flow_batchsize+consistency_batchsize],
+                                                                            vis_cond=vis_cond[flow_batchsize:flow_batchsize+consistency_batchsize],
+                                                                            lang_cond=lang_cond[flow_batchsize:flow_batchsize+consistency_batchsize] if lang_cond is not None else None,
+                                                                            ema_model=ema_model
+                                                                            )
+            v_ct_pred = self.model(
+                sample=consistency_target_dict['x_t'],
+                timestep=consistency_target_dict['t'].squeeze(),
+                target_t=consistency_target_dict['target_t'].squeeze(),
+                vis_cond=vis_cond[flow_batchsize:flow_batchsize+consistency_batchsize],
+                lang_cond=lang_cond[flow_batchsize:flow_batchsize+consistency_batchsize] if lang_cond is not None else None,
+                )
+            v_ct_pred_magnitude = torch.sqrt(torch.mean(v_ct_pred ** 2)).item()
+        else:
+            v_ct_pred_magnitude = 0.0
 
         """Compute losses"""
         loss = 0.
 
-        # compute flow loss 
+        # compute flow loss
         v_flow_target = flow_target_dict['v_target']
         loss_flow = F.mse_loss(v_flow_pred, v_flow_target, reduction='none')
         loss_flow = reduce(loss_flow, 'b ... -> b (...)', 'mean')
         loss += loss_flow.mean()
         loss_flow = loss_flow.mean().item()
 
-        # compute consistency training loss
-        v_ct_target = consistency_target_dict['v_target']
-        loss_ct = F.mse_loss(v_ct_pred, v_ct_target, reduction='none')
-        loss_ct = reduce(loss_ct, 'b ... -> b (...)', 'mean')
-        loss += loss_ct.mean()
-        loss_ct = loss_ct.mean().item()  
+        # compute consistency training loss only if EMA is enabled
+        if use_consistency:
+            v_ct_target = consistency_target_dict['v_target']
+            loss_ct = F.mse_loss(v_ct_pred, v_ct_target, reduction='none')
+            loss_ct = reduce(loss_ct, 'b ... -> b (...)', 'mean')
+            loss += loss_ct.mean()
+            loss_ct = loss_ct.mean().item()
+        else:
+            loss_ct = 0.0
 
         loss = loss.mean()
         loss_dict = {
