@@ -550,6 +550,10 @@ class ManiFlowSE3PointcloudPolicy(BaseImagePolicy):
 
             # Predict velocity (7D: pos_vel, omega, gripper_vel)
             pred = self.model(x, ti, target_t=target_t, **model_kwargs)
+            
+            # Unnormalize
+            pred[...,3:6]=pred[...,3:6]*3.14
+
 
             # Update using SE(3) exponential map
             batch_size, horizon, _ = x.shape
@@ -638,6 +642,10 @@ class ManiFlowSE3PointcloudPolicy(BaseImagePolicy):
 
         # Compute loss
         v_flow_target = flow_target_dict['v_target']
+
+        # Normalize
+        v_flow_target[..., 3:6]=v_flow_target[..., 3:6]/3.14
+
 
         # Separate loss for position, rotation, and gripper
         loss_pos = F.mse_loss(v_flow_pred[..., :3], v_flow_target[..., :3])

@@ -60,7 +60,7 @@ policy:
   pcd_down_sample_num: 1024
   shape_meta: ${shape_meta}
 
-  use_pc_color: false
+  use_pc_color: true
   pointnet_type: "pointnet"
   downsample_points: true
   pointcloud_encoder_cfg:
