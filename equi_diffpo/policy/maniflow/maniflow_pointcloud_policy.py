@@ -425,11 +425,13 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         x_t_next = self.linear_interpolate(x0_ct, x1_ct, t_next, epsilon=0.0)
 
         # predict the average velocity from t_next toward next target (t_next + delta_t2)
+        # Use EMA model if available, otherwise use current model
         with torch.no_grad():
-            v_avg_to_next_target = ema_model.model(
-                sample=x_t_next, 
+            model_to_use = ema_model.model if ema_model is not None else self.model
+            v_avg_to_next_target = model_to_use(
+                sample=x_t_next,
                 timestep=t_next.squeeze(),
-                target_t=target_t_next.squeeze(), 
+                target_t=target_t_next.squeeze(),
                 vis_cond=vis_cond[-consistency_batchsize:],
                 lang_cond=lang_cond[-consistency_batchsize:] if lang_cond is not None else None,
             ) 

@@ -57,7 +57,7 @@ policy:
   crop_shape: null
   encoder_output_dim: 128
   pcd_input_channel: 6  # xyz + rgb
-  pcd_down_sample_num: 512
+  pcd_down_sample_num: 1024
   shape_meta: ${shape_meta}
 
   use_pc_color: false
@@ -109,7 +109,7 @@ training:
   lr_warmup_steps: 500
   num_epochs: ${eval:'50000 / ${n_demo}'}
   gradient_accumulate_every: 1
-  use_ema: True
+  use_ema: False
   rollout_every: ${eval:'max(1, int(1000 / ${n_demo}))'}
   checkpoint_every: ${eval:'max(1, int(1000 / ${n_demo}))'}
   val_every: 1

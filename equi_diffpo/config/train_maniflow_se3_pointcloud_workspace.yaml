@@ -59,7 +59,7 @@ policy:
   crop_shape: null
   encoder_output_dim: 128
   pcd_input_channel: 6  # xyz + rgb
-  pcd_down_sample_num: 512
+  pcd_down_sample_num: 1024
   shape_meta: ${shape_meta}
 
   use_pc_color: false

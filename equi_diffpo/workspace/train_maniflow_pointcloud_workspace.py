@@ -54,6 +54,9 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
                 self.ema_model = copy.deepcopy(self.model)
             except:
                 self.ema_model = hydra.utils.instantiate(cfg.policy)
+            cprint("[EMA] Exponential Moving Average is ENABLED", "green")
+        else:
+            cprint("[EMA] Exponential Moving Average is DISABLED", "yellow")
 
         # configure training state
         self.global_step = 0
@@ -76,7 +79,9 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
             lastest_ckpt_path = self.get_checkpoint_path()
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+                # Exclude EMA model from loading if use_ema is False
+                exclude_keys = ['ema_model'] if not cfg.training.use_ema else []
+                self.load_checkpoint(path=lastest_ckpt_path, exclude_keys=exclude_keys)
 
         # configure dataset
         dataset: BaseImageDataset
@@ -176,7 +181,8 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # forward pass
-                        loss,loss_dict = self.model.compute_loss(batch,self.ema_model)
+                        ema_model_to_use = self.ema_model if cfg.training.use_ema else None
+                        loss,loss_dict = self.model.compute_loss(batch, ema_model_to_use)
                         loss = loss / cfg.training.gradient_accumulate_every
                         # backward pass
                         loss.backward()
@@ -228,7 +234,8 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss,loss_dict = self.model.compute_loss(batch,self.ema_model)
+                                ema_model_to_use = self.ema_model if cfg.training.use_ema else None
+                                loss,loss_dict = self.model.compute_loss(batch, ema_model_to_use)
                                 val_losses.append(loss.item())
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
