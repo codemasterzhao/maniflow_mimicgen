@@ -352,3 +352,251 @@ def action_7d_to_10d(action_7d):
     action_10d = action_10d_flat.reshape(*original_shape, 10)
 
     return action_10d
+
+
+def obtain_rigid_SE3_group(pos, R):
+    """
+    Concatenate SO(3) rotation matrix and 3D translation vector into a 4x4 SE(3) transformation matrix.
+
+    Args:
+        pos: Translation vector, shape (..., 3)
+        R: Rotation matrix, shape (..., 3, 3)
+
+    Returns:
+        T: SE(3) homogeneous transformation matrix, shape (..., 4, 4)
+    """
+    # pos: (..., 3)
+    # R: (..., 3, 3)
+    # Build the last row [0, 0, 0, 1]
+    *batch_shape, _ = pos.shape
+    last_row = torch.zeros(*batch_shape, 1, 4, dtype=R.dtype, device=R.device)
+    last_row[..., 0, 3] = 1.0
+
+    # Concatenate rotation and translation to form the upper 3x4 part
+    upper = torch.cat([R, pos.unsqueeze(-1)], dim=-1)   # (..., 3, 4)
+
+    # Stack the last row to get (..., 4, 4)
+    T = torch.cat([upper, last_row], dim=-2)           # (..., 4, 4)
+    return T
+
+def inv_SE3(Rt):
+    """
+    Inverse of SE(3) transformation matrix.
+    """
+    *batch_shape, _ = Rt.shape
+    t = Rt[..., :3, 3]
+    R = Rt[..., :3, :3]
+    R_inv = inv_SO3(R)
+    t_inv = -R_inv @ t.unsqueeze(-1)
+    Rt_inv = obtain_rigid_SE3_group(t_inv.squeeze(-1), R_inv)
+    return Rt_inv
+
+
+def log_SE3(Rt, eps_stab=1e-3):
+    """
+    Lie group logarithm of SE(3) transformation matrix.
+    Computes the Lie algebra element A such that exp(A) = Rt.
+    
+    Args:
+        Rt: SE(3) transformation matrix, shape (..., 4, 4)
+        eps_stab: Small value for numerical stability
+        
+    Returns:
+        A: Lie algebra element in se(3), shape (..., 4, 4)
+    """
+    # Extract translation and rotation
+    t = Rt[..., :3, 3]  # translation vector
+    R = Rt[..., :3, :3]  # rotation matrix
+    
+    # Compute SO(3) logarithm (rotation part)
+    omega_mat = log_SO3(R)  # [..., 3, 3]
+    omega_vec = bracket_so3(omega_mat)  # [..., 3] - convert to vector form
+    
+    # Compute rotation angle
+    theta = torch.norm(omega_vec, dim=-1, keepdim=True)  # [..., 1]
+    
+    # Initialize output matrix
+    A = torch.zeros_like(Rt)
+    
+    # Handle small angle case (near identity)
+    small_angle_mask = theta.squeeze(-1) < eps_stab
+    
+    if small_angle_mask.any():
+        # For small angles, use linear approximation
+        A[small_angle_mask, :3, :3] = omega_mat[small_angle_mask]
+        A[small_angle_mask, :3, 3] = t[small_angle_mask]
+    
+    # Handle regular case
+    regular_mask = ~small_angle_mask
+    if regular_mask.any():
+        # For regular case, compute screw displacement
+        omega_vec_regular = omega_vec[regular_mask]  # [N, 3]
+        theta_regular = theta[regular_mask]  # [N, 1]
+        t_regular = t[regular_mask]  # [N, 3]
+        
+        # Normalized rotation axis
+        K = omega_vec_regular / theta_regular  # [N, 3]
+        
+        # Parallel component of translation
+        t_par = torch.sum(t_regular * K, dim=-1, keepdim=True) * K  # [N, 3]
+        
+        # Perpendicular component of translation
+        t_perp = t_regular - t_par  # [N, 3]
+        
+        # Screw axis position (center of rotation)
+        # c = 0.5 * (t_perp + cot(theta/2) * K × t_perp)
+        theta_half = theta_regular / 2
+        cot_theta_half = torch.cos(theta_half) / (torch.sin(theta_half) + eps_stab)
+        cross_term = torch.cross(K, t_perp, dim=-1)
+        c = 0.5 * (t_perp + cot_theta_half * cross_term)
+        
+        # Linear velocity component
+        v = -torch.cross(omega_vec_regular, c, dim=-1) + t_par.squeeze(-1)
+        
+        # Pack the result
+        A[regular_mask, :3, :3] = omega_mat[regular_mask]
+        A[regular_mask, :3, 3] = v
+    
+    return A
+
+
+def bracket_se3(A):
+    """
+    Bracket operation for se(3) Lie algebra.
+    Converts between vector and matrix representations.
+    
+    Args:
+        A: Either vector representation [..., 6] or matrix representation [..., 4, 4]
+           Vector format: [vx, vy, vz, wx, wy, wz] (3 linear + 3 angular)
+           Matrix format: 4x4 se(3) matrix
+    
+    Returns:
+        If input is vector: matrix representation [..., 4, 4]
+        If input is matrix: vector representation [..., 6]
+    """
+    # vector -> matrix
+    if A.shape[-1] == 6:
+        batch_shape = A.shape[:-1]
+        device = A.device
+        dtype = A.dtype
+        
+        # Extract linear and angular components
+        v = A[..., :3]  # linear velocity [..., 3]
+        w = A[..., 3:6]  # angular velocity [..., 3]
+        
+        # Initialize output matrix
+        out = torch.zeros(*batch_shape, 4, 4, device=device, dtype=dtype)
+        
+        # Set rotation part (upper-left 3x3) using so(3) bracket
+        omega_mat = bracket_so3(w)  # [..., 3, 3]
+        out[..., :3, :3] = omega_mat
+        
+        # Set translation part (upper-right 3x1)
+        out[..., :3, 3] = v
+        
+        # Bottom row remains zero [0, 0, 0, 0]
+        
+    # matrix -> vector
+    elif A.shape[-2:] == (4, 4):
+        # Extract linear velocity from translation part
+        v = A[..., :3, 3]  # [..., 3]
+        
+        # Extract angular velocity from rotation part using so(3) bracket
+        omega_mat = A[..., :3, :3]  # [..., 3, 3]
+        w = bracket_so3(omega_mat)  # [..., 3]
+        
+        # Concatenate linear and angular components
+        out = torch.cat([v, w], dim=-1)  # [..., 6]
+        
+    else:
+        raise ValueError(f"bracket_se3: input must be of shape (..., 6) or (..., 4, 4). Current shape: {tuple(A.shape)}")
+    
+    return out
+
+
+def exp_se3(w_vec):
+    """
+    Exponential map from se(3) to SE(3).
+    Input can be either vector (N, 6) or matrix (N, 4, 4) representation.
+    
+    Args:
+        w_vec: Either vector representation [..., 6] or matrix representation [..., 4, 4]
+               Vector format: [vx, vy, vz, wx, wy, wz] (3 linear + 3 angular)
+               Matrix format: 4x4 se(3) matrix
+    
+    Returns:
+        T: SE(3) transformation matrix, shape (..., 4, 4)
+    """
+    # Convert matrix to vector if needed
+    if w_vec.shape[-2:] == (4, 4):
+        w_vec = bracket_se3(w_vec)  # Convert matrix to vector
+    elif w_vec.shape[-1] != 6:
+        raise ValueError(f"exp_se3: input must be of shape (..., 6) or (..., 4, 4). Current shape: {tuple(w_vec.shape)}")
+    
+    # Extract linear and angular components
+    v = w_vec[..., :3]  # linear velocity [..., 3]
+    w = w_vec[..., 3:6]  # angular velocity [..., 3]
+    
+    # Compute rotation angle
+    theta = torch.norm(w, dim=-1)  # [...,]
+    
+    # Initialize output matrix
+    batch_shape = w_vec.shape[:-1]
+    device = w_vec.device
+    dtype = w_vec.dtype
+    T = torch.zeros(*batch_shape, 4, 4, device=device, dtype=dtype)
+    
+    # Handle small angle case (near identity)
+    small_angle_mask = theta < EPS
+    
+    if small_angle_mask.any():
+        # For small angles, use linear approximation
+        # R ≈ I + ω_hat
+        omega_mat_small = bracket_so3(w[small_angle_mask])
+        R_small = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(omega_mat_small.shape[0], -1, -1) + omega_mat_small
+        
+        # Translation: t ≈ v (linear approximation)
+        t_small = v[small_angle_mask]
+        
+        # Pack into SE(3) matrix
+        T[small_angle_mask, :3, :3] = R_small
+        T[small_angle_mask, :3, 3] = t_small
+        T[small_angle_mask, 3, 3] = 1.0
+    
+    # Handle regular case
+    regular_mask = ~small_angle_mask
+    if regular_mask.any():
+        w_regular = w[regular_mask]  # [N, 3]
+        v_regular = v[regular_mask]  # [N, 3]
+        theta_regular = theta[regular_mask]  # [N]
+        
+        # Normalized rotation axis
+        K = w_regular / theta_regular.unsqueeze(-1)  # [N, 3]
+        
+        # Compute rotation matrix using Rodrigues' formula
+        K_mat = bracket_so3(K)  # [N, 3, 3]
+        theta_expanded = theta_regular.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
+        
+        R_regular = (torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(len(w_regular), -1, -1) +
+                    torch.sin(theta_expanded) * K_mat +
+                    (1 - torch.cos(theta_expanded)) * torch.bmm(K_mat, K_mat))
+        
+        # Compute translation using SE(3) exponential formula
+        # t = V * v, where V = (I - R) * K^T / theta^2 + K * K^T
+        V_inv = torch.bmm(torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(len(w_regular), -1, -1) - R_regular,
+                          K_mat.transpose(-2, -1))  # [N, 3, 3]
+        V_inv = V_inv / (theta_regular.unsqueeze(-1).unsqueeze(-1) ** 2 + EPS)  # [N, 3, 3]
+        
+        # Add K * K^T term
+        K_outer = torch.bmm(K.unsqueeze(-1), K.unsqueeze(-2))  # [N, 3, 3]
+        V_inv = V_inv + K_outer
+        
+        # Compute translation
+        t_regular = torch.bmm(V_inv, v_regular.unsqueeze(-1)).squeeze(-1)  # [N, 3]
+        
+        # Pack into SE(3) matrix
+        T[regular_mask, :3, :3] = R_regular
+        T[regular_mask, :3, 3] = t_regular
+        T[regular_mask, 3, 3] = 1.0
+    
+    return T
