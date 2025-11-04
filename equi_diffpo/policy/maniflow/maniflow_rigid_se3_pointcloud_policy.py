@@ -24,7 +24,7 @@ from equi_diffpo.common.se3_utils import (
     inv_SE3,
     bracket_se3,
     obtain_rigid_SE3_group,
-    exp_SO3,
+    exp_so3,
     log_SO3,
     inv_SO3,
     bracket_so3,
@@ -579,7 +579,9 @@ class ManiFlowRigidSE3PointcloudPolicy(BaseImagePolicy):
             Rt_current = obtain_rigid_SE3_group(x_flat[:, :3], R_current)
 
             # Angular velocity from prediction (body frame, right trivialization)
-            w_vel = pred_flat[:, 3:6]
+            w_vel = pred_flat[:, :6]
+            
+            
             dR = exp_se3(dt * w_vel)
 
             # Apply rotation update: R_new = R_current @ dR (RIGHT trivialization)
