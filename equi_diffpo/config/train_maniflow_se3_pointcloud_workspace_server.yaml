@@ -1,0 +1,146 @@
+defaults:
+  - _self_
+  - task: mimicgen_pc_abs
+
+name: train_maniflow_se3_pointcloud
+_target_: equi_diffpo.workspace.train_maniflow_se3_pointcloud_workspace.TrainManiFlowSE3PointcloudWorkspace
+
+shape_meta: ${task.shape_meta}
+# Override action shape for SE(3) policy (7D instead of 10D)
+# Action: [pos_x, pos_y, pos_z, ang_vel_x, ang_vel_y, ang_vel_z, gripper]
+exp_name: "maniflow_se3_pc"
+
+task_name: stack_d1
+n_demo: 100
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+dataset_target: equi_diffpo.dataset.robomimic_replay_point_cloud_dataset.RobomimicReplayPointCloudDataset
+dataset_path: /ocean/projects/cis250114p/hzhao19/data/${task_name}/${task_name}_voxel_abs.hdf5
+
+policy:
+  _target_: equi_diffpo.policy.maniflow.maniflow_se3_pointcloud_policy.ManiFlowSE3PointcloudPolicy
+
+  # ManiFlow SE(3) parameters
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 10
+  obs_as_global_cond: ${obs_as_global_cond}
+
+  # DiTX Transformer architecture
+  n_layer: 12
+  n_head: 8
+  n_emb: 768
+  visual_cond_len: 1024
+  max_lang_cond_len: 1024
+  qkv_bias: True
+  qk_norm: True
+  block_type: "DiTX"
+  language_conditioned: False
+
+  # ManiFlow training parameters (simplified, no consistency)
+  denoise_timesteps: 10
+  sample_t_mode_flow: "beta"
+  sample_target_t_mode: "absolute"
+  diffusion_timestep_embed_dim: 128
+  diffusion_target_t_embed_dim: 128
+
+  # SE(3) specific parameters
+  se3_noise_std_pos: 1.0  # Standard deviation for position noise
+  se3_noise_std_rot: 1.0  # Standard deviation for rotation noise (axis-angle)
+
+  # Point cloud encoder parameters
+  encoder_type: "DP3Encoder"
+  crop_shape: null
+  encoder_output_dim: 128
+  pcd_input_channel: 6  # xyz + rgb
+  pcd_down_sample_num: 1024
+  shape_meta: ${shape_meta}
+
+  use_pc_color: true
+  pointnet_type: "pointnet"
+  downsample_points: true
+  pointcloud_encoder_cfg:
+    in_channels: 6
+    out_channels: ${policy.encoder_output_dim}
+    use_layernorm: true
+    final_norm: layernorm # layernorm, none
+    normal_channel: false
+    num_points: ${policy.visual_cond_len}
+    pointwise: true
+
+dataloader:
+  batch_size: 32
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: ${eval:'50000 / ${n_demo}'}
+  gradient_accumulate_every: 1
+  use_ema: False  # Disabled for simplicity
+  rollout_every: ${eval:'max(1, int(1000 / ${n_demo}))'}
+  checkpoint_every: ${eval:'max(1, int(1000 / ${n_demo}))'}
+  val_every: 1
+  sample_every: 5
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: maniflow_se3_pointcloud_${task_name}
+  resume: True
+  mode: online
+  name: ${name}_${task_name}_${n_demo}demo
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: ${exp_name}
+
+checkpoint:
+  save_ckpt: True
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: /ocean/projects/cis250114p/hzhao19/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: /ocean/projects/cis250114p/hzhao19/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: /ocean/projects/cis250114p/hzhao19/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
