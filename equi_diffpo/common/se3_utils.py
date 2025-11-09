@@ -82,6 +82,7 @@ def log_SO3(R):
     return w_mat
 
 
+# Identity to approximate exp(w) for small w ?????
 def exp_so3(w_vec):
     """
     Exponential map from so(3) to SO(3).
@@ -392,72 +393,72 @@ def inv_SE3(Rt):
     return Rt_inv
 
 
-def log_SE3(Rt, eps_stab=1e-3):
-    """
-    Lie group logarithm of SE(3) transformation matrix.
-    Computes the Lie algebra element A such that exp(A) = Rt.
+# def log_SE3(Rt, eps_stab=EPS):
+#     """
+#     Lie group logarithm of SE(3) transformation matrix.
+#     Computes the Lie algebra element A such that exp(A) = Rt.
     
-    Args:
-        Rt: SE(3) transformation matrix, shape (..., 4, 4)
-        eps_stab: Small value for numerical stability
+#     Args:
+#         Rt: SE(3) transformation matrix, shape (..., 4, 4)
+#         eps_stab: Small value for numerical stability
         
-    Returns:
-        A: Lie algebra element in se(3), shape (..., 4, 4)
-    """
-    # Extract translation and rotation
-    t = Rt[..., :3, 3]  # translation vector
-    R = Rt[..., :3, :3]  # rotation matrix
+#     Returns:
+#         A: Lie algebra element in se(3), shape (..., 4, 4)
+#     """
+#     # Extract translation and rotation
+#     t = Rt[..., :3, 3]  # translation vector
+#     R = Rt[..., :3, :3]  # rotation matrix
     
-    # Compute SO(3) logarithm (rotation part)
-    omega_mat = log_SO3(R)  # [..., 3, 3]
-    omega_vec = bracket_so3(omega_mat)  # [..., 3] - convert to vector form
+#     # Compute SO(3) logarithm (rotation part)
+#     omega_mat = log_SO3(R)  # [..., 3, 3]
+#     omega_vec = bracket_so3(omega_mat)  # [..., 3] - convert to vector form
     
-    # Compute rotation angle
-    theta = torch.norm(omega_vec, dim=-1, keepdim=True)  # [..., 1]
+#     # Compute rotation angle
+#     theta = torch.norm(omega_vec, dim=-1, keepdim=True)  # [..., 1]
     
-    # Initialize output matrix
-    A = torch.zeros_like(Rt)
+#     # Initialize output matrix
+#     A = torch.zeros_like(Rt)
     
-    # Handle small angle case (near identity)
-    small_angle_mask = theta.squeeze(-1) < eps_stab
+#     # Handle small angle case (near identity)
+#     small_angle_mask = theta.squeeze(-1) < eps_stab
     
-    if small_angle_mask.any():
-        # For small angles, use linear approximation
-        A[small_angle_mask, :3, :3] = omega_mat[small_angle_mask]
-        A[small_angle_mask, :3, 3] = t[small_angle_mask]
+#     if small_angle_mask.any():
+#         # For small angles, use linear approximation
+#         A[small_angle_mask, :3, :3] = omega_mat[small_angle_mask]
+#         A[small_angle_mask, :3, 3] = t[small_angle_mask]
     
-    # Handle regular case
-    regular_mask = ~small_angle_mask
-    if regular_mask.any():
-        # For regular case, compute screw displacement
-        omega_vec_regular = omega_vec[regular_mask]  # [N, 3]
-        theta_regular = theta[regular_mask]  # [N, 1]
-        t_regular = t[regular_mask]  # [N, 3]
+#     # Handle regular case
+#     regular_mask = ~small_angle_mask
+#     if regular_mask.any():
+#         # For regular case, compute screw displacement
+#         omega_vec_regular = omega_vec[regular_mask]  # [N, 3]
+#         theta_regular = theta[regular_mask]  # [N, 1]
+#         t_regular = t[regular_mask]  # [N, 3]
         
-        # Normalized rotation axis
-        K = omega_vec_regular / theta_regular  # [N, 3]
+#         # Normalized rotation axis
+#         K = omega_vec_regular / theta_regular  # [N, 3]
         
-        # Parallel component of translation
-        t_par = torch.sum(t_regular * K, dim=-1, keepdim=True) * K  # [N, 3]
+#         # Parallel component of translation
+#         t_par = torch.sum(t_regular * K, dim=-1, keepdim=True) * K  # [N, 3]
         
-        # Perpendicular component of translation
-        t_perp = t_regular - t_par  # [N, 3]
+#         # Perpendicular component of translation
+#         t_perp = t_regular - t_par  # [N, 3]
         
-        # Screw axis position (center of rotation)
-        # c = 0.5 * (t_perp + cot(theta/2) * K × t_perp)
-        theta_half = theta_regular / 2
-        cot_theta_half = torch.cos(theta_half) / (torch.sin(theta_half) + eps_stab)
-        cross_term = torch.cross(K, t_perp, dim=-1)
-        c = 0.5 * (t_perp + cot_theta_half * cross_term)
+#         # Screw axis position (center of rotation)
+#         # c = 0.5 * (t_perp + cot(theta/2) * K × t_perp)
+#         theta_half = theta_regular / 2
+#         cot_theta_half = torch.cos(theta_half) / (torch.sin(theta_half) + eps_stab)
+#         cross_term = torch.cross(K, t_perp, dim=-1)
+#         c = 0.5 * (t_perp + cot_theta_half * cross_term)
         
-        # Linear velocity component
-        v = -torch.cross(omega_vec_regular, c, dim=-1) + t_par.squeeze(-1)
+#         # Linear velocity component
+#         v = -torch.cross(omega_vec_regular, c, dim=-1) + t_par.squeeze(-1)
         
-        # Pack the result
-        A[regular_mask, :3, :3] = omega_mat[regular_mask]
-        A[regular_mask, :3, 3] = v
+#         # Pack the result
+#         A[regular_mask, :3, :3] = omega_mat[regular_mask]
+#         A[regular_mask, :3, 3] = v
     
-    return A
+#     return A
 
 
 def bracket_se3(A):
@@ -614,11 +615,14 @@ def hat_so3(w):  # (...,3) -> (...,3,3)
     O[..., 2, 1] =  wx
     return O
 
+def vee_so3(W):  # (...,3,3)->(...,3)
+    return torch.stack([W[...,2,1], W[...,0,2], W[...,1,0]], dim=-1)
+
 def rodrigues_exp_so3(w):  # (...,3) -> (...,3,3)
     theta = torch.linalg.norm(w, dim=-1)[..., None, None]  # (...,1,1)
     W = hat_so3(w)                                         # (...,3,3)
     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
-    small = (theta < 1e-5).squeeze(-1).squeeze(-1)
+    small = (theta < EPS).squeeze(-1).squeeze(-1)
 
     # series for small angles: R ≈ I + W + 1/2 W^2
     R = torch.empty_like(W)
@@ -638,7 +642,7 @@ def left_jacobian_SO3(w):  # J(ω): (...,3) -> (...,3,3)
     theta = torch.linalg.norm(w, dim=-1)[..., None, None]  # (...,1,1)
     W = hat_so3(w)
     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
-    small = (theta < 1e-5).squeeze(-1).squeeze(-1)
+    small = (theta < EPS).squeeze(-1).squeeze(-1)
 
     # series: J ≈ I + 1/2 W + 1/6 W^2
     J = torch.empty_like(W)
@@ -653,6 +657,30 @@ def left_jacobian_SO3(w):  # J(ω): (...,3) -> (...,3,3)
         B = (t - torch.sin(t)) / (t * t * t)
         J[~small] = I[~small] + A * Wn + B * (Wn @ Wn)
     return J
+
+
+def left_jacobian_SO3_inv(w):  # J^{-1}(ω): (...,3)->(...,3,3)
+    theta = torch.linalg.norm(w, dim=-1)[..., None, None]     # (...,1,1)
+    W = hat_so3(w)
+    I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
+    small = (theta < EPS).squeeze(-1).squeeze(-1)
+
+    Jinv = torch.empty_like(W)
+
+    # Taylor series for small angles: J^{-1} ≈ I - 1/2 W + 1/12 W^2
+    if small.any():
+        Ws = W[small]
+        Jinv[small] = I[small] - 0.5 * Ws + (1.0/12.0) * (Ws @ Ws)
+
+    if (~small).any():
+        t = theta[~small]
+        Wn = W[~small]
+        a = 0.5
+        b = (1.0/(t*t)) - (1.0 + torch.cos(t)) / (2.0 * t * torch.sin(t))
+        Jinv[~small] = I[~small] - a * Wn + b * (Wn @ Wn)
+    return Jinv
+
+
 
 def vee_se3(X):  # (...,4,4) se(3) -> (...,6) [v, w]
     v = X[..., :3, 3]
@@ -694,3 +722,27 @@ def exp_se3(w_vec):
     T[..., :3,  3] = t
     T[..., 3,  3] = 1.
     return T
+
+
+def log_SE3(Rt, eps_stab=EPS):
+    """
+    Log: SE(3) -> se(3) (left-invariant)
+    """
+    # Split
+    t = Rt[..., :3, 3]        # (...,3)
+    R = Rt[..., :3, :3]       # (...,3,3)
+
+    # Rotation logarithm
+    Omega = log_SO3(R)        # (...,3,3)
+    w = vee_so3(Omega)        # (...,3)
+
+    # Angle
+    Jinv = left_jacobian_SO3_inv(w)           # (...,3,3)
+    v = (Jinv @ t[..., None]).squeeze(-1)     # (...,3)
+
+    # Assemble se(3)
+    A = torch.zeros_like(Rt)
+    A[..., :3, :3] = Omega
+    A[..., :3,  3] = v
+    # A[..., 3, 3] remains 0
+    return A
