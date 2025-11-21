@@ -602,8 +602,156 @@ def bracket_se3(A):
     
 #     return T
 
+# ------------------ no orthogonalization on SO(3) and first order expansion on small angles ------------------
+
+# def hat_so3(w):  # (...,3) -> (...,3,3)
+#     wx, wy, wz = w[...,0], w[...,1], w[...,2]
+#     O = torch.zeros(*w.shape[:-1], 3, 3, dtype=w.dtype, device=w.device)
+#     O[..., 0, 1] = -wz
+#     O[..., 0, 2] =  wy
+#     O[..., 1, 0] =  wz
+#     O[..., 1, 2] = -wx
+#     O[..., 2, 0] = -wy
+#     O[..., 2, 1] =  wx
+#     return O
+
+# def vee_so3(W):  # (...,3,3)->(...,3)
+#     return torch.stack([W[...,2,1], W[...,0,2], W[...,1,0]], dim=-1)
+
+# def rodrigues_exp_so3(w):  # (...,3) -> (...,3,3)
+#     theta = torch.linalg.norm(w, dim=-1)[..., None, None]  # (...,1,1)
+#     W = hat_so3(w)                                         # (...,3,3)
+#     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
+#     small = (theta < EPS).squeeze(-1).squeeze(-1)
+
+#     # series for small angles: R ≈ I + W + 1/2 W^2
+#     R = torch.empty_like(W)
+#     if small.any():
+#         Ws = W[small]
+#         R[small] = I[small] + Ws + 0.5 * (Ws @ Ws)
+
+#     if (~small).any():
+#         t = theta[~small]
+#         Wn = W[~small]
+#         A = (torch.sin(t) / t)
+#         B = ((1.0 - torch.cos(t)) / (t * t))
+#         R[~small] = I[~small] + A * Wn + B * (Wn @ Wn)
+#     return R
+
+# def left_jacobian_SO3(w):  # J(ω): (...,3) -> (...,3,3)
+#     theta = torch.linalg.norm(w, dim=-1)[..., None, None]  # (...,1,1)
+#     W = hat_so3(w)
+#     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
+#     small = (theta < EPS).squeeze(-1).squeeze(-1)
+
+#     # series: J ≈ I + 1/2 W + 1/6 W^2
+#     J = torch.empty_like(W)
+#     if small.any():
+#         Ws = W[small]
+#         J[small] = I[small] + 0.5 * Ws + (1.0/6.0) * (Ws @ Ws)
+
+#     if (~small).any():
+#         t = theta[~small]
+#         Wn = W[~small]
+#         A = (1.0 - torch.cos(t)) / (t * t)
+#         B = (t - torch.sin(t)) / (t * t * t)
+#         J[~small] = I[~small] + A * Wn + B * (Wn @ Wn)
+#     return J
 
 
+# def left_jacobian_SO3_inv(w):  # J^{-1}(ω): (...,3)->(...,3,3)
+#     theta = torch.linalg.norm(w, dim=-1)[..., None, None]     # (...,1,1)
+#     W = hat_so3(w)
+#     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
+#     small = (theta < EPS).squeeze(-1).squeeze(-1)
+
+#     Jinv = torch.empty_like(W)
+
+#     # Taylor series for small angles: J^{-1} ≈ I - 1/2 W + 1/12 W^2
+#     if small.any():
+#         Ws = W[small]
+#         Jinv[small] = I[small] - 0.5 * Ws + (1.0/12.0) * (Ws @ Ws)
+
+#     if (~small).any():
+#         t = theta[~small]
+#         Wn = W[~small]
+#         a = 0.5
+#         b = (1.0/(t*t)) - (1.0 + torch.cos(t)) / (2.0 * t * torch.sin(t))
+#         Jinv[~small] = I[~small] - a * Wn + b * (Wn @ Wn)
+#     return Jinv
+
+
+
+# def vee_se3(X):  # (...,4,4) se(3) -> (...,6) [v, w]
+#     v = X[..., :3, 3]
+#     w = torch.stack([X[..., 2,1], X[..., 0,2], X[..., 1,0]], dim=-1)
+#     return torch.cat([v, w], dim=-1)
+
+# def hat_se3(xi):  # (...,6) [v,w] -> (...,4,4)
+#     v, w = xi[..., :3], xi[..., 3:]
+#     W = hat_so3(w)
+#     Z = torch.zeros(*xi.shape[:-1], 1, 3, dtype=xi.dtype, device=xi.device)
+#     last = torch.zeros(*xi.shape[:-1], 1, 1, dtype=xi.dtype, device=xi.device)
+#     upper = torch.cat([W, v[..., None]], dim=-1)            # (...,3,4)
+#     lower = torch.cat([Z, last], dim=-1)                    # (...,1,4)
+#     return torch.cat([upper, lower], dim=-2)                # (...,4,4)
+
+# def exp_se3(w_vec):
+#     """
+#     Correct left-invariant exponential: Exp([v,w]^)= [ R, J(w) v ; 0, 1 ].
+#     Input: (...,6) as [v, w], or (...,4,4) se(3) matrix.
+#     Output: (...,4,4) in SE(3).
+#     """
+#     # Accept 4x4 se(3)
+#     if w_vec.shape[-2:] == (4, 4):
+#         w_vec = vee_se3(w_vec)  
+
+#     if w_vec.shape[-1] != 6:
+#         raise ValueError(f"exp_se3: input must be (...,6) or (...,4,4), got {tuple(w_vec.shape)}")
+
+#     v = w_vec[..., :3]
+#     w = w_vec[..., 3:]
+
+#     R = rodrigues_exp_so3(w)        # (...,3,3)
+#     J = left_jacobian_SO3(w)        # (...,3,3)
+#     t = (J @ v[..., None]).squeeze(-1)  # (...,3)
+
+#     # pack
+#     T = torch.zeros(*w_vec.shape[:-1], 4, 4, dtype=w_vec.dtype, device=w_vec.device)
+#     T[..., :3, :3] = R
+#     T[..., :3,  3] = t
+#     T[..., 3,  3] = 1.
+#     return T
+
+
+# def log_SE3(Rt, eps_stab=EPS):
+#     """
+#     Log: SE(3) -> se(3) (left-invariant)
+#     """
+#     # Split
+#     t = Rt[..., :3, 3]        # (...,3)
+#     R = Rt[..., :3, :3]       # (...,3,3)
+
+#     # Rotation logarithm
+#     Omega = log_SO3(R)        # (...,3,3)
+#     w = vee_so3(Omega)        # (...,3)
+
+#     # Angle
+#     Jinv = left_jacobian_SO3_inv(w)           # (...,3,3)
+#     v = (Jinv @ t[..., None]).squeeze(-1)     # (...,3)
+
+#     # Assemble se(3)
+#     A = torch.zeros_like(Rt)
+#     A[..., :3, :3] = Omega
+#     A[..., :3,  3] = v
+#     # A[..., 3, 3] remains 0
+#     return A
+
+
+
+
+
+# ------------------ orthogonalization on SO(3) and identity on small angles ------------------
 def hat_so3(w):  # (...,3) -> (...,3,3)
     wx, wy, wz = w[...,0], w[...,1], w[...,2]
     O = torch.zeros(*w.shape[:-1], 3, 3, dtype=w.dtype, device=w.device)
@@ -644,11 +792,10 @@ def left_jacobian_SO3(w):  # J(ω): (...,3) -> (...,3,3)
     I = torch.eye(3, dtype=w.dtype, device=w.device).expand(W.shape)
     small = (theta < EPS).squeeze(-1).squeeze(-1)
 
-    # series: J ≈ I + 1/2 W + 1/6 W^2
+    # series: J ≈ I 
     J = torch.empty_like(W)
     if small.any():
-        Ws = W[small]
-        J[small] = I[small] + 0.5 * Ws + (1.0/6.0) * (Ws @ Ws)
+        J[small] = I[small]
 
     if (~small).any():
         t = theta[~small]
@@ -667,10 +814,9 @@ def left_jacobian_SO3_inv(w):  # J^{-1}(ω): (...,3)->(...,3,3)
 
     Jinv = torch.empty_like(W)
 
-    # Taylor series for small angles: J^{-1} ≈ I - 1/2 W + 1/12 W^2
+    # Taylor series for small angles: J^{-1} ≈ I 
     if small.any():
-        Ws = W[small]
-        Jinv[small] = I[small] - 0.5 * Ws + (1.0/12.0) * (Ws @ Ws)
+        Jinv[small] = I[small]
 
     if (~small).any():
         t = theta[~small]
@@ -711,8 +857,7 @@ def exp_se3(w_vec):
 
     v = w_vec[..., :3]
     w = w_vec[..., 3:]
-
-    R = rodrigues_exp_so3(w)        # (...,3,3)
+    R = exp_so3(w)        # (...,3,3)
     J = left_jacobian_SO3(w)        # (...,3,3)
     t = (J @ v[..., None]).squeeze(-1)  # (...,3)
 

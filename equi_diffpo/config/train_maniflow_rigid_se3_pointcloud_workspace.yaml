@@ -142,5 +142,3 @@ hydra:
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
     subdir: ${hydra.job.num}
-
-
