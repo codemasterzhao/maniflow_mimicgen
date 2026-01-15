@@ -16,8 +16,9 @@ BASE_DIR="equi_diffpo/data/robomimic/datasets"
 
 # List of all datasets (excluding stack_d1 which is already processed)
 DATASETS=(
-
-    "stack_three_d1"
+    "mug_cleanup_d1"
+    "nut_assembly_d0"
+    "pick_place_d0"
 )
 
 # Number of datasets to process in parallel (adjust based on CPU capacity)
