@@ -153,17 +153,25 @@ from equi_diffpo.common.se3_utils import (
 
 ---
 
+## 数据集旋转表示对比
+
+| 数据集 | 旋转表示 | 内部维度 | 说明 |
+|--------|----------|----------|------|
+| **MimicGen** | 3×3 旋转矩阵 | 10D `[pos(3), rot_6d(6), gripper(1)]` | 需要 6D rotation |
+| **OpenPi** | axis-angle (3D) | 7D `[pos(3), aa(3), gripper(1)]` | 直接用 7D |
+
+
 # OpenPi SE(3) 改造方案详解
 
 ## OpenPi vs SE3 Policy 架构对比
 
-| 特性 | OpenPi (当前) | SE3 Policy (目标) |
-|------|--------------|------------------|
+| 特性 | OpenPi (当前) | OpenPi SE3 (目标) |
+|------|--------------|-------------------|
 | **几何空间** | R^32 欧几里得 (padded) | SE(3) = R^3 × SO(3) × R |
-| **状态维度** | 32D (action_dim) | 10D: [pos(3), rot_6d(6), gripper(1)] |
-| **速度维度** | 32D (同状态) | 7D: [pos_vel(3), omega(3), gripper_vel(1)] |
-| **模型输出** | v_t (32D) | v_t (7D) |
-| **环境动作** | 7D (action_env_dim) | 10D → 7D 转换 |
+| **状态维度** | 7D → padding 32D | 7D `[pos(3), aa(3), gripper(1)]` → padding 32D |
+| **速度维度** | 32D (同状态) | 7D `[pos_vel(3), omega(3), gripper_vel(1)]` |
+| **模型输出** | v_t (32D) | v_t 前7D有效，后25D padding |
+| **环境动作** | 7D | 7D (无需转换) |
 | **噪声方法** | flow_sde / flow_noise / flow_cps | SE(3) 流形采样 |
 
 ---
@@ -174,20 +182,21 @@ from equi_diffpo.common.se3_utils import (
 
 ---
 
-## 1. 配置类 `OpenPi0Config` (L34-66)
+## 1. 配置类 `OpenPi0Config`
 
 ```python
 # 当前
 noise_method: str = "flow_sde"
-action_env_dim: int = 7
+action_env_dim: int = 7  # 7D: [pos(3), axis_angle(3), gripper(1)]
 
 # SE3修改 - 新增配置项
-action_dim_internal: int = 10  # 10D: [pos(3), rot_6d(6), gripper(1)]
-action_dim_velocity: int = 7   # 7D: [pos_vel(3), omega(3), gripper_vel(1)]
-noise_method: str = "flow_se3" # 新增方法
-se3_noise_std_pos: float = 1.0
-se3_noise_std_rot: float = 1.0
+noise_method: str = "flow_se3"  # 新增方法
+se3_noise_std_pos: float = 1.0   # 位置噪声标准差
+se3_noise_std_rot: float = 1.0   # 旋转噪声标准差 (影响“均匀”程度)
 ```
+
+问题: 
+- 位置噪声 标准差  和 旋转噪声标准差 应该是多少?
 
 ---
 
@@ -203,65 +212,55 @@ from rlinf.models.embodiment.openpi.se3_utils import (
 
 ---
 
-## 3. 噪声采样 (L390-391) → `sample_se3_noise()`
+## 3. 噪声采样 `sample_se3_noise()`
 
 ```python
-# 当前
-noise = self.sample_noise(actions_shape, device)  # 全高斯 32D
-
-# SE3 新增方法
 def sample_se3_noise(self, batch_size, horizon, device):
-    """Sample noise on SE(3) manifold."""
+    """Sample noise on SE(3) manifold for 7D action."""
     # 位置: 高斯
     pos_noise = torch.randn(batch_size, horizon, 3, device=device) * self.config.se3_noise_std_pos
     
-    # 旋转: SO(3) 均匀采样 → 6D
-    R_noise = sample_uniform_SO3(batch_size * horizon, device)
-    rot_noise_6d = matrix_to_rotation_6d(R_noise).reshape(batch_size, horizon, 6)
+    # 旋转: SO(3) 均匀采样 → axis-angle
+    R_noise = sample_uniform_SO3(batch_size * horizon, device)  # 3x3 矩阵
+    log_R = log_SO3(R_noise)
+    aa_noise = bracket_so3(log_R).reshape(batch_size, horizon, 3)  # axis-angle 3D
     
     # 夹爪: 高斯
     gripper_noise = torch.randn(batch_size, horizon, 1, device=device)
     
-    # Padding 到 32D
-    noise_10d = torch.cat([pos_noise, rot_noise_6d, gripper_noise], dim=-1)
-    noise_32d = F.pad(noise_10d, (0, 22), value=0)  # padding
+    # 组合成7D，然后 padding 到 32D
+    noise_7d = torch.cat([pos_noise, aa_noise, gripper_noise], dim=-1)
+    noise_32d = F.pad(noise_7d, (0, 25), value=0)  # 7D → 32D
     return noise_32d
 ```
 
 ---
 
-## 4. ODE更新 `sample_mean_var_val()` (L500-603)
+## 4. ODE更新 `sample_mean_var_val()`
 
 ```python
-# 当前 (L570-575) - 欧氏空间线性更新
-x0_pred = x_t - v_t * t_input
-x1_pred = x_t + v_t * (1 - t_input)
-x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
-x_t_next = x_t_mean + noise * x_t_std
-
-# SE3修改 - 分别处理 pos/rot/gripper
+# SE3修改 - 分别处理 pos/rot/gripper (7D 方案)
 # 位置 (线性)
 pos_mean = x_t[:, :, :3] + delta * v_t[:, :, :3]
 
-# 旋转 (SO(3) 指数映射)
-rot_6d = x_t[:, :, 3:9].reshape(-1, 6)
-R_current = rotation_6d_to_matrix(rot_6d)
-omega = v_t[:, :, 3:6].reshape(-1, 3)
+# 旋转 (SO(3) 指数映射) - axis-angle 版本
+aa_current = x_t[:, :, 3:6].reshape(-1, 3)
+R_current = exp_so3(aa_current)  # axis-angle → 旋转矩阵
+omega = v_t[:, :, 3:6].reshape(-1, 3)  # 角速度
 dR = exp_so3(delta * omega)
 R_new = R_current @ dR  # RIGHT trivialization
 # SVD 正交化
 U, _, Vt = torch.linalg.svd(R_new)
-det_sign = torch.det(U @ Vt).unsqueeze(-1).unsqueeze(-1)
-S = torch.eye(3, device=R_new.device).unsqueeze(0).expand_as(R_new).clone()
-S[:, 2, 2] = det_sign.squeeze()
-R_new = U @ S @ Vt
-rot_6d_new = matrix_to_rotation_6d(R_new).reshape(batch_size, horizon, 6)
+R_new = U @ Vt
+aa_new = bracket_so3(log_SO3(R_new)).reshape(batch_size, horizon, 3)  # → axis-angle
 
 # 夹爪 (线性)
-gripper_mean = x_t[:, :, 9:10] + delta * v_t[:, :, 6:7]
+gripper_mean = x_t[:, :, 6:7] + delta * v_t[:, :, 6:7]
 
-# 组合
-x_t_mean = torch.cat([pos_mean, rot_6d_new, gripper_mean], dim=-1)
+# 组合 7D
+x_t_mean_7d = torch.cat([pos_mean, aa_new, gripper_mean], dim=-1)
+# Padding 到 32D
+x_t_mean = F.pad(x_t_mean_7d, (0, 25), value=0)
 ```
 
 ---
@@ -270,28 +269,25 @@ x_t_mean = torch.cat([pos_mean, rot_6d_new, gripper_mean], dim=-1)
 
 ```python
 def se3_interpolate(self, noise, target, t):
-    """Geodesic interpolation on SE(3) manifold."""
-    batch_size, horizon, _ = noise.shape
-    
+    """Lie group interpolation on SE(3) manifold (7D version)."""
     # 位置: 线性插值
     pos_t = noise[:, :, :3] + t * (target[:, :, :3] - noise[:, :, :3])
     
-    # 旋转: SO(3) Lie group插值
-    rot_6d_0 = noise[:, :, 3:9].reshape(-1, 6)
-    rot_6d_1 = target[:, :, 3:9].reshape(-1, 6)
-    R_0 = rotation_6d_to_matrix(rot_6d_0)
-    R_1 = rotation_6d_to_matrix(rot_6d_1)
+    # 旋转: SO(3) Lie group插值 (axis-angle 版本)
+    aa_0 = noise[:, :, 3:6].reshape(-1, 3)
+    aa_1 = target[:, :, 3:6].reshape(-1, 3)
+    R_0 = exp_so3(aa_0)
+    R_1 = exp_so3(aa_1)
     R_delta = inv_SO3(R_0) @ R_1
-    log_R_delta = log_SO3(R_delta)
-    omega = bracket_so3(log_R_delta)  # body frame angular velocity
-    t_flat = t.expand(-1, horizon, 1).reshape(-1, 1)
+    omega = bracket_so3(log_SO3(R_delta))  # body frame 角速度
+    t_flat = t.reshape(-1, 1)
     R_t = R_0 @ exp_so3(t_flat * omega)
-    rot_6d_t = matrix_to_rotation_6d(R_t).reshape(batch_size, horizon, 6)
+    aa_t = bracket_so3(log_SO3(R_t)).reshape(-1, horizon, 3)
     
     # 夹爪: 线性插值
-    gripper_t = noise[:, :, 9:10] + t * (target[:, :, 9:10] - noise[:, :, 9:10])
+    gripper_t = noise[:, :, 6:7] + t * (target[:, :, 6:7] - noise[:, :, 6:7])
     
-    return torch.cat([pos_t, rot_6d_t, gripper_t], dim=-1)
+    return torch.cat([pos_t, aa_t, gripper_t], dim=-1)  # 7D
 ```
 
 ---
@@ -300,88 +296,73 @@ def se3_interpolate(self, noise, target, t):
 
 ```python
 def get_se3_velocity(self, noise, target):
-    """Compute velocity in SE(3) tangent space (RIGHT trivialization)."""
-    batch_size, horizon, _ = noise.shape
-    
+    """Compute velocity in SE(3) tangent space (7D version)."""
     # 位置速度: 差分
     vel_pos = target[:, :, :3] - noise[:, :, :3]
     
-    # 角速度: body frame
-    # omega_body = log(R_0^T @ R_1)
-    R_0 = rotation_6d_to_matrix(noise[:, :, 3:9].reshape(-1, 6))
-    R_1 = rotation_6d_to_matrix(target[:, :, 3:9].reshape(-1, 6))
+    # 角速度: body frame (axis-angle 版本)
+    aa_0 = noise[:, :, 3:6].reshape(-1, 3)
+    aa_1 = target[:, :, 3:6].reshape(-1, 3)
+    R_0 = exp_so3(aa_0)
+    R_1 = exp_so3(aa_1)
     R_delta = inv_SO3(R_0) @ R_1
-    log_R_delta = log_SO3(R_delta)
-    vel_ang = bracket_so3(log_R_delta).reshape(batch_size, horizon, 3)
+    vel_ang = bracket_so3(log_SO3(R_delta)).reshape(-1, horizon, 3)
     
     # 夹爪速度: 差分
-    vel_gripper = target[:, :, 9:10] - noise[:, :, 9:10]
+    vel_gripper = target[:, :, 6:7] - noise[:, :, 6:7]
     
     return torch.cat([vel_pos, vel_ang, vel_gripper], dim=-1)  # 7D
 ```
 
 ---
 
-## 7. Log Probability 修改 (L672-749)
+## 7. Log Probability 修改
 
 ```python
-# 当前: 32D 统一计算
-log_probs = self.get_logprob_norm(chains_next, x_t_mean, x_t_std)
-
-# SE3修改: 分开计算
+# SE3修改: 分开计算 (7D 版本)
 log_prob_pos = self.get_logprob_norm(chains_next[..., :3], x_t_mean[..., :3], x_t_std[..., :3])
-log_prob_rot = self.get_logprob_norm(chains_next[..., 3:9], x_t_mean[..., 3:9], x_t_std[..., 3:9])
-log_prob_gripper = self.get_logprob_norm(chains_next[..., 9:10], x_t_mean[..., 9:10], x_t_std[..., 9:10])
+log_prob_rot = self.get_logprob_norm(chains_next[..., 3:6], x_t_mean[..., 3:6], x_t_std[..., 3:6])
+log_prob_gripper = self.get_logprob_norm(chains_next[..., 6:7], x_t_mean[..., 6:7], x_t_std[..., 6:7])
 log_probs = log_prob_pos + log_prob_rot + log_prob_gripper
 ```
 
 ---
 
-## 8. 动作输出转换 (10D → 7D)
+## 8. 动作输出
 
-```python
-def action_10d_to_7d(action_10d):
-    """Convert 10D internal action to 7D environment action."""
-    pos = action_10d[..., :3]
-    rot_6d = action_10d[..., 3:9]
-    gripper = action_10d[..., 9:10]
-    
-    # 6D → axis-angle
-    R = rotation_6d_to_matrix(rot_6d.reshape(-1, 6))
-    log_R = log_SO3(R)
-    axis_angle = bracket_so3(log_R)
-    
-    return torch.cat([pos.reshape(-1, 3), axis_angle, gripper.reshape(-1, 1)], dim=-1)
-```
+OpenPi 7D 方案无需转换，直接输出 `[pos(3), axis_angle(3), gripper(1)]`，与环境接口一致。
 
 ---
 
-## 改造策略对比
-
-### 方案A: 最小修改 (推荐)
+## 改造策略: 7D 直接方案
 
 | 修改项 | 说明 |
 |--------|------|
-| `sample_se3_noise()` | 新增，采样10D后padding到32D |
-| `sample_mean_var_val()` | 只修改前10D的更新逻辑 |
-| 模型输出 | 保持32D，只使用前7D作为速度 |
+| `sample_se3_noise()` | SO(3)均匀采样 → axis-angle，padding刲32D |
+| `sample_mean_var_val()` | 前7D用SE3更新，后25D保持padding |
+| `se3_interpolate()` | axis-angle → R → Lie group插值 → axis-angle |
+| `get_se3_velocity()` | 计算7D速度，旋转部分用角速度 |
+| 模型输出 | 保持32D，只使用前7D |
+| 动作输出 | 无需转换，直接7D |
 
-**优点**: 改动小，兼容现有代码  
-**缺点**: 多余计算
+**优点**: 与环境接口一致，无需额外转换  
+**注意**: axis-angle 在 π 附近有奇点，但机器人动作通常不会达到180°旋转
 
 ---
 
-## 新增依赖文件
+## 新增依赖
 
-将 `maniflow_mimicgen/equi_diffpo/common/se3_utils.py` 复制到:
-```
-rlinf/models/embodiment/openpi/se3_utils.py
-```
+将 `maniflow_mimicgen/equi_diffpo/common/se3_utils.py` 复制到 `rlinf/models/embodiment/openpi/se3_utils.py`
 
-核心函数:
-- `sample_uniform_SO3()` - SO(3) 均匀采样
-- `exp_so3()` / `log_SO3()` - 指数/对数映射
-- `rotation_6d_to_matrix()` / `matrix_to_rotation_6d()` - 6D ↔ 矩阵
+```python
+from rlinf.models.embodiment.openpi.se3_utils import (
+    sample_uniform_SO3,   # SO(3)均匀采样
+    exp_so3,              # axis-angle → SO(3)
+    log_SO3,              # SO(3) → so(3)
+    inv_SO3,              # SO(3)逆
+    bracket_so3,          # so(3)矩阵 → axis-angle向量
+)
+```
 
 ---
 
@@ -399,7 +380,7 @@ rlinf/models/embodiment/openpi/se3_utils.py
 
 ## 潜在问题
 
-1. **VLM 兼容性** - 需确认32D是硬编码还是可配置 ->  32D 是 需要 padding 的. 
-2. **归一化** - 6D旋转需要identity归一化
-3. **数值稳定性** - SO(3) 映射在奇点需特殊处理
-4. **训练稳定性** - 可能需调整学习率
+1. **axis-angle 奇点** - 在 θ=π 附近有不连续性，但机器人动作一般不达到180°
+2. **归一化** - 只归一化pos和gripper，axis-angle保持原始范围
+3. **数值稳定性** - ODE更新时SVD正交化保证旋转矩阵有效
+4. **32D padding** - 后25D保持为0，不影响VLM计算
