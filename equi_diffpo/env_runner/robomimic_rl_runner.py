@@ -125,8 +125,9 @@ class RobomimicRLRunner(RobomimicImageRunner):
         combined_rl_data = self._combine_rl_chunks(all_rl_data)
 
         # Standard logging (inherited from parent) - only log first n_available for unique seeds
+        # update_max=False: don't let noisy rollout scores pollute the max_score tracker
         n_log = min(n_inits, n_available)
-        log_data = self._log_standard_metrics(all_video_paths[:n_log], all_rewards[:n_log], n_log)
+        log_data = self._log_standard_metrics(all_video_paths[:n_log], all_rewards[:n_log], n_log, update_max=False)
 
         # Add RL-specific metrics (with video paths for RL-specific video logging)
         log_data.update(self._log_rl_metrics(combined_rl_data, video_paths=all_video_paths[:n_log]))
@@ -390,7 +391,8 @@ class RobomimicRLRunner(RobomimicImageRunner):
 
         return combined_data
 
-    def _log_standard_metrics(self, all_video_paths, all_rewards, n_inits) -> Dict:
+    def _log_standard_metrics(self, all_video_paths, all_rewards, n_inits,
+                              update_max=True) -> Dict:
         """Log standard metrics (inherited from parent class)."""
         max_rewards = collections.defaultdict(list)
         log_data = dict()
@@ -413,7 +415,8 @@ class RobomimicRLRunner(RobomimicImageRunner):
             name = prefix+'mean_score'
             value = np.mean(value)
             log_data[name] = value
-            self.max_rewards[prefix] = max(self.max_rewards[prefix], value)
+            if update_max:
+                self.max_rewards[prefix] = max(self.max_rewards[prefix], value)
             log_data[prefix+'max_score'] = self.max_rewards[prefix]
 
         return log_data

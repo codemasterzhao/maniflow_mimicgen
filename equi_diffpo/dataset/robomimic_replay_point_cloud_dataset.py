@@ -32,6 +32,32 @@ from equi_diffpo.common.normalize_util import (
 from scipy.spatial.transform import Rotation as Rot
 register_codecs()
 
+
+def _apply_identity_normalize_dims(normalizer, identity_normalize_dims):
+    """
+    Set normalizer to identity (scale=1, offset=0) for specified keys/dims.
+
+    Args:
+        normalizer: LinearNormalizer after fit()
+        identity_normalize_dims: dict mapping key names to either:
+            - True: entire key becomes identity
+            - [start, end]: dims start:end become identity
+            If None, no-op.
+    """
+    if not identity_normalize_dims:
+        return
+    for key, spec in identity_normalize_dims.items():
+        if key not in normalizer.params_dict:
+            continue
+        if spec is True:
+            normalizer.params_dict[key]['scale'][:] = 1.0
+            normalizer.params_dict[key]['offset'][:] = 0.0
+        elif isinstance(spec, (list, tuple)) and len(spec) == 2:
+            start, end = spec
+            normalizer.params_dict[key]['scale'][start:end] = 1.0
+            normalizer.params_dict[key]['offset'][start:end] = 0.0
+
+
 class RobomimicReplayPointCloudDataset(BaseImageDataset):
     def __init__(self,
             shape_meta: dict,
@@ -154,9 +180,11 @@ class RobomimicReplayPointCloudDataset(BaseImageDataset):
         val_set.train_mask = ~self.train_mask
         return val_set
 
-    def get_normalizer(self, mode='limits', canonicalization_mode=None, **kwargs) -> LinearNormalizer:
+    def get_normalizer(self, mode='limits', canonicalization_mode=None,
+                        identity_normalize_dims=None, **kwargs) -> LinearNormalizer:
         if canonicalization_mode is not None:
-            return self._get_relative_normalizer(canonicalization_mode, mode, **kwargs)
+            return self._get_relative_normalizer(canonicalization_mode, mode,
+                                                  identity_normalize_dims=identity_normalize_dims, **kwargs)
 
         data = {
             'action': self.replay_buffer['action'],
@@ -167,12 +195,14 @@ class RobomimicReplayPointCloudDataset(BaseImageDataset):
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        _apply_identity_normalize_dims(normalizer, identity_normalize_dims)
         for key in self.rgb_keys:
             normalizer[key] = get_image_range_normalizer()
         # normalizer['point_cloud'] = SingleFieldLinearNormalizer.create_identity()
         return normalizer
 
-    def _get_relative_normalizer(self, canonicalization_mode, mode='limits', **kwargs) -> LinearNormalizer:
+    def _get_relative_normalizer(self, canonicalization_mode, mode='limits',
+                                    identity_normalize_dims=None, **kwargs) -> LinearNormalizer:
         """
         Build normalizer using relative (canonicalized) values for action and point_cloud.
         eef_pos, eef_quat, gripper_qpos remain absolute.
@@ -222,6 +252,7 @@ class RobomimicReplayPointCloudDataset(BaseImageDataset):
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        _apply_identity_normalize_dims(normalizer, identity_normalize_dims)
         for key in self.rgb_keys:
             normalizer[key] = get_image_range_normalizer()
         return normalizer

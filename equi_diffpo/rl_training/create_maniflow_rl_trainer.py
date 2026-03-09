@@ -29,7 +29,8 @@ def get_normalizer_from_dataset(cfg: OmegaConf) -> Optional[LinearNormalizer]:
     print(f"⏳ Loading normalizer from dataset (this may take ~25 minutes)...")
     dataset = hydra.utils.instantiate(cfg.task.dataset)
     canonicalization_mode = cfg.policy.get('canonicalization_mode', None) if cfg.policy.get('use_canonicalization', False) else None
-    normalizer = dataset.get_normalizer(canonicalization_mode=canonicalization_mode)
+    identity_normalize_dims = OmegaConf.to_container(cfg.get('identity_normalize_dims', None), resolve=True) if cfg.get('identity_normalize_dims', None) is not None else None
+    normalizer = dataset.get_normalizer(canonicalization_mode=canonicalization_mode, identity_normalize_dims=identity_normalize_dims)
     print(f"✅ Normalizer loaded from dataset")
     return normalizer
 
