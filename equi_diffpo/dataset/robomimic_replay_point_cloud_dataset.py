@@ -29,6 +29,7 @@ from equi_diffpo.common.normalize_util import (
     get_identity_normalizer_from_stat,
     array_to_stats
 )
+from scipy.spatial.transform import Rotation as Rot
 register_codecs()
 
 class RobomimicReplayPointCloudDataset(BaseImageDataset):
@@ -153,7 +154,10 @@ class RobomimicReplayPointCloudDataset(BaseImageDataset):
         val_set.train_mask = ~self.train_mask
         return val_set
 
-    def get_normalizer(self, mode='limits', **kwargs) -> LinearNormalizer:
+    def get_normalizer(self, mode='limits', canonicalization_mode=None, **kwargs) -> LinearNormalizer:
+        if canonicalization_mode is not None:
+            return self._get_relative_normalizer(canonicalization_mode, mode, **kwargs)
+
         data = {
             'action': self.replay_buffer['action'],
             'robot0_eef_pos': self.replay_buffer['robot0_eef_pos'][...,:],
@@ -166,6 +170,60 @@ class RobomimicReplayPointCloudDataset(BaseImageDataset):
         for key in self.rgb_keys:
             normalizer[key] = get_image_range_normalizer()
         # normalizer['point_cloud'] = SingleFieldLinearNormalizer.create_identity()
+        return normalizer
+
+    def _get_relative_normalizer(self, canonicalization_mode, mode='limits', **kwargs) -> LinearNormalizer:
+        """
+        Build normalizer using relative (canonicalized) values for action and point_cloud.
+        eef_pos, eef_quat, gripper_qpos remain absolute.
+        """
+        actions = self.replay_buffer['action'][:]          # [N, 10]
+        eef_pos = self.replay_buffer['robot0_eef_pos'][:]  # [N, 3]
+        eef_quat = self.replay_buffer['robot0_eef_quat'][:]  # [N, 4] xyzw
+        pc = self.replay_buffer['point_cloud'][:]          # [N, 1024, C]
+
+        if canonicalization_mode == "translation_only":
+            # Relative position: action_pos - eef_pos
+            rel_action_pos = actions[:, :3] - eef_pos
+            rel_actions = np.concatenate([rel_action_pos, actions[:, 3:]], axis=-1)
+
+            # Relative point cloud xyz
+            rel_pc = pc.copy()
+            rel_pc[:, :, :3] = pc[:, :, :3] - eef_pos[:, None, :]
+
+        elif canonicalization_mode == "se3":
+            # Rotation matrices from eef quaternion (xyzw format for scipy)
+            R_eef = Rot.from_quat(eef_quat).as_matrix()       # [N, 3, 3]
+            R_inv = R_eef.transpose(0, 2, 1)                   # [N, 3, 3]
+
+            # Relative action position: R_inv @ (action_pos - eef_pos)
+            delta_pos = actions[:, :3] - eef_pos
+            rel_action_pos = np.einsum('nij,nj->ni', R_inv, delta_pos)
+
+            # Rotation_6d and gripper: rotation_6d values stay in [-1,1] after
+            # relative rotation, so we keep them as-is for stats computation.
+            rel_actions = np.concatenate([rel_action_pos, actions[:, 3:]], axis=-1)
+
+            # Relative point cloud xyz: R_inv @ (pc_xyz - eef_pos)
+            rel_pc = pc.copy()
+            delta_pc = pc[:, :, :3] - eef_pos[:, None, :]
+            rel_pc[:, :, :3] = np.einsum('nij,nmj->nmi', R_inv, delta_pc)
+        else:
+            raise ValueError(f"Unsupported canonicalization_mode: {canonicalization_mode}")
+
+        # Build normalizer with relative action and point_cloud stats,
+        # absolute stats for eef_pos, eef_quat, gripper_qpos
+        data = {
+            'action': rel_actions,
+            'robot0_eef_pos': self.replay_buffer['robot0_eef_pos'][:],
+            'robot0_eef_quat': self.replay_buffer['robot0_eef_quat'][:],
+            'robot0_gripper_qpos': self.replay_buffer['robot0_gripper_qpos'][:],
+            'point_cloud': rel_pc,
+        }
+        normalizer = LinearNormalizer()
+        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        for key in self.rgb_keys:
+            normalizer[key] = get_image_range_normalizer()
         return normalizer
 
     def get_all_actions(self) -> torch.Tensor:

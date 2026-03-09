@@ -83,7 +83,8 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
-        normalizer = dataset.get_normalizer()
+        canonicalization_mode = cfg.policy.get('canonicalization_mode', None) if cfg.policy.get('use_canonicalization', False) else None
+        normalizer = dataset.get_normalizer(canonicalization_mode=canonicalization_mode)
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
