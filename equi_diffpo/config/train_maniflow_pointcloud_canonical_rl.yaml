@@ -55,8 +55,8 @@ policy:
   diffusion_target_t_embed_dim: 128
 
   # RL exploration noise
-  noise_level: 0.1
-  noise_anneal: true
+  noise_level: 0.3
+  noise_anneal: false
   noise_params: [0.1, 0.2, 100]  # [noise_start, noise_end, anneal_steps]
 
   # Point cloud encoder parameters

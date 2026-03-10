@@ -117,6 +117,10 @@ class ManiFlowRolloutCollector:
         self.obs_chunk_size = obs_chunk_size
         self.device = torch.device(device)
 
+        # Dense reward model (set externally by PPO workspace if enabled)
+        self.reward_model = None
+        self.sparse_reward_bonus = 10.0
+
         # Following RLinf pattern: Keep policy in eval mode for rollout collection
         # Exploration is controlled algorithmically via mode parameter, not PyTorch train/eval
         self.policy.eval()
@@ -192,7 +196,7 @@ class ManiFlowRolloutCollector:
         # Extract step-by-step data (already in correct format from RobomimicRLRunner)
         observations = rl_data['observations']        # Dict[str, np.ndarray] [n_steps, batch_size, ...]
         actions = rl_data['actions']                  # [n_steps, batch_size, action_chunk, action_dim]
-        rewards = rl_data['rewards']                  # [n_steps, batch_size, 1] - chunk-level reward
+        rewards = rl_data['rewards']                  # [n_steps, batch_size, 1] - chunk-level reward (sparse)
         dones = rl_data['dones']                      # [n_steps, batch_size, 1]
         prev_logprobs = rl_data['prev_logprobs']      # [n_steps, batch_size, action_chunk, action_dim]
         prev_values = rl_data['prev_values']          # [n_steps, batch_size, 1]
@@ -203,6 +207,17 @@ class ManiFlowRolloutCollector:
 
         n_steps = rl_data['total_steps']
         batch_size = rl_data['total_envs']
+
+        # Inject dense reward if reward model is available
+        if self.reward_model is not None and 'after_observations' in rl_data:
+            print(f"Computing dense rewards with DopamineRewardModel...")
+            dense_rewards = self.reward_model.compute_rewards(rl_data)  # [n_steps, batch_size, 1]
+            # Combine: dense + sparse_bonus * sparse
+            sparse_rewards = rewards.copy()
+            rewards = dense_rewards + self.sparse_reward_bonus * sparse_rewards
+            print(f"Combined rewards: dense mean={dense_rewards.mean():.4f}, "
+                  f"sparse sum={sparse_rewards.sum():.1f}, "
+                  f"final mean={rewards.mean():.4f}")
 
         print(f"✅ Converted runner results to rollout batch:")
         print(f"  - Steps: {n_steps}")
@@ -302,6 +317,28 @@ class ManiFlowRolloutCollector:
             x_stds=x_stds,
         )
 
+    def collect_rollouts_raw(self, num_episodes: Optional[int] = None, num_envs: Optional[int] = None) -> Dict:
+        """
+        Collect rollouts and return raw runner results (without converting to batch).
+        Used when VRAM swapping is needed between rollout collection and batch conversion.
+
+        Returns:
+            Raw runner results dict
+        """
+        print(f"🎲 Collecting rollouts using {type(self.env_runner).__name__}...")
+        if num_episodes is not None:
+            print(f"  Requested {num_episodes} episodes")
+
+        self.policy.eval()
+
+        if hasattr(self.env_runner, 'run_rl'):
+            runner_results = self.env_runner.run_rl(self.policy, n_episodes=num_episodes)
+        else:
+            print("⚠️  Using regular runner - ensure it's RobomimicRLRunner for RL data")
+            runner_results = self.env_runner.run(self.policy, eval_mode=False, n_episodes=num_episodes)
+
+        return runner_results
+
     def collect_rollouts(self, num_episodes: Optional[int] = None, num_envs: Optional[int] = None) -> Tuple[ManiFlowRolloutBatch, List[str]]:
         """
         Collect rollouts using the real environment runner following RLinf pattern.
@@ -315,23 +352,7 @@ class ManiFlowRolloutCollector:
                 - ManiFlowRolloutBatch: Collected rollout data for RL training
                 - List[str]: Video paths from rollout collection
         """
-        print(f"🎲 Collecting rollouts using {type(self.env_runner).__name__}...")
-        if num_episodes is not None:
-            print(f"  Requested {num_episodes} episodes")
-
-        # Following RLinf pattern: Keep policy in eval mode during rollout collection
-        # Exploration is handled algorithmically via mode="train" parameter, not PyTorch train/eval
-        self.policy.eval()
-
-        # Use the real env runner to collect rollouts
-        # Check if we have the RL-compatible runner
-        if hasattr(self.env_runner, 'run_rl'):
-            # Use RL-specific method that collects step-by-step data
-            runner_results = self.env_runner.run_rl(self.policy, n_episodes=num_episodes)
-        else:
-            # Fall back to regular run method (should work with eval_mode=False)
-            print("⚠️  Using regular runner - ensure it's RobomimicRLRunner for RL data")
-            runner_results = self.env_runner.run(self.policy, eval_mode=False, n_episodes=num_episodes)
+        runner_results = self.collect_rollouts_raw(num_episodes=num_episodes, num_envs=num_envs)
 
         # Convert results to our batch format
         rollout_batch = self.collect_rollouts_from_runner_results(runner_results)
@@ -443,6 +464,17 @@ class ManiFlowDummyEnvRunner:
 
         # Generate dummy observations
         observations = {
+            'agentview_image': np.random.randn(n_steps, batch_size, self.obs_horizon, 3, 84, 84).astype(np.float32),
+            'robot0_eye_in_hand_image': np.random.randn(n_steps, batch_size, self.obs_horizon, 3, 84, 84).astype(np.float32),
+            'point_cloud': np.random.randn(n_steps, batch_size, self.obs_horizon, 1024, 6).astype(np.float32),
+            'robot0_eef_pos': np.random.randn(n_steps, batch_size, self.obs_horizon, 3).astype(np.float32),
+            'robot0_eef_quat': np.random.randn(n_steps, batch_size, self.obs_horizon, 4).astype(np.float32),
+            'robot0_gripper_qpos': np.random.randn(n_steps, batch_size, self.obs_horizon, 2).astype(np.float32),
+        }
+
+        # Generate dummy after observations (same structure, different random data)
+        after_observations = {
+            'agentview_image': np.random.randn(n_steps, batch_size, self.obs_horizon, 3, 84, 84).astype(np.float32),
             'robot0_eye_in_hand_image': np.random.randn(n_steps, batch_size, self.obs_horizon, 3, 84, 84).astype(np.float32),
             'point_cloud': np.random.randn(n_steps, batch_size, self.obs_horizon, 1024, 6).astype(np.float32),
             'robot0_eef_pos': np.random.randn(n_steps, batch_size, self.obs_horizon, 3).astype(np.float32),
@@ -474,6 +506,7 @@ class ManiFlowDummyEnvRunner:
 
         rl_data = {
             'observations': observations,
+            'after_observations': after_observations,
             'actions': actions,
             'rewards': rewards,
             'dones': dones,

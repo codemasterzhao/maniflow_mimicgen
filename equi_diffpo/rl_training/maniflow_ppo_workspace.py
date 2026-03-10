@@ -100,13 +100,16 @@ class ManiFlowPPOTrainer:
                  config: PPOConfig,
                  advantage_config: AdvantageConfig,
                  device: str = "cuda",
-                 use_wandb: bool = True):
+                 use_wandb: bool = True,
+                 reward_model=None,
+                 sparse_reward_bonus: float = 10.0):
 
         self.policy = policy
         self.env_runner = env_runner
         self.config = config
         self.device = torch.device(device)
         self.use_wandb = use_wandb
+        self.reward_model = reward_model
 
         # Move policy to device
         self.policy.to(self.device)
@@ -119,6 +122,12 @@ class ManiFlowPPOTrainer:
             obs_chunk_size=self.config.obs_chunk_size,
             device=self.device
         )
+
+        # Wire reward model into rollout collector
+        if self.reward_model is not None:
+            self.rollout_collector.reward_model = self.reward_model
+            self.rollout_collector.sparse_reward_bonus = sparse_reward_bonus
+            print(f"Dense reward model enabled (sparse_bonus={sparse_reward_bonus})")
 
         self.advantage_calculator = ManiFlowAdvantageCalculator(advantage_config)
 
@@ -303,12 +312,29 @@ class ManiFlowPPOTrainer:
 
         while self.global_step < self.config.total_timesteps:
             rollout_start_time = time.time()
-            # Stage 1: Collect rollouts
+            # Stage 1: Collect rollouts (policy on GPU)
             print(f"\n📊 Rollout {self.rollout_count + 1} (Step {self.global_step:,}/{self.config.total_timesteps:,})")
-            rollout_batch, video_paths = self.rollout_collector.collect_rollouts(
+            runner_results = self.rollout_collector.collect_rollouts_raw(
                 num_episodes=self.config.train_n_episodes,
                 num_envs=self.config.num_envs
             )
+
+            # Stage 1.5: If reward model exists, offload policy to free GPU for reward subprocess
+            if self.reward_model is not None:
+                print("Offloading policy to CPU for reward model subprocess...")
+                self.policy.cpu()
+                torch.cuda.empty_cache()
+
+                # compute_rewards runs as subprocess (separate conda env, manages its own GPU)
+                rollout_batch = self.rollout_collector.collect_rollouts_from_runner_results(runner_results)
+
+                # Restore policy to GPU
+                self.policy.to(self.device)
+                print("Policy restored to GPU.")
+            else:
+                rollout_batch = self.rollout_collector.collect_rollouts_from_runner_results(runner_results)
+
+            video_paths = runner_results.get('video_paths', [])
 
             # Get actual samples collected
             actual_samples = rollout_batch.n_chunk_steps * rollout_batch.batch_size

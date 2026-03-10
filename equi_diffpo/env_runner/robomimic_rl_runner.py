@@ -156,6 +156,7 @@ class RobomimicRLRunner(RobomimicImageRunner):
 
         # Initialize episode data storage
         episode_observations = []
+        episode_after_observations = []  # Store post-step observations for reward model
         episode_actions = []
         episode_rewards = []
         episode_dones = []
@@ -226,6 +227,9 @@ class RobomimicRLRunner(RobomimicImageRunner):
 
             obs, reward, done_array, info = env.step(env_action)
 
+            # Store post-step observations for dense reward model
+            episode_after_observations.append(self._copy_obs_dict(dict(obs), n_active_envs))
+
             # reward is cumulative max from MultiStepWrapper - extract actual chunk reward
             # (once success occurs, cumulative max stays at 1 forever, but we need per-chunk reward)
             cumulative_rewards = reward[:n_active_envs]  # Current cumulative max
@@ -276,6 +280,7 @@ class RobomimicRLRunner(RobomimicImageRunner):
 
         return {
             'observations': episode_observations,
+            'after_observations': episode_after_observations,
             'actions': episode_actions,
             'rewards': episode_rewards,
             'dones': episode_dones,
@@ -362,12 +367,25 @@ class RobomimicRLRunner(RobomimicImageRunner):
                 obs_per_chunk.append(stacked)
             combined_observations[key] = np.concatenate(obs_per_chunk, axis=1)
 
+        # After observations (post-step, for dense reward model)
+        combined_after_observations = {}
+        if 'after_observations' in chunk_data_list[0] and chunk_data_list[0]['after_observations']:
+            after_obs_keys = chunk_data_list[0]['after_observations'][0].keys()
+            for key in after_obs_keys:
+                after_obs_per_chunk = []
+                for chunk in chunk_data_list:
+                    obs_list = [step_obs[key] for step_obs in chunk['after_observations']]
+                    stacked = np.stack(obs_list, axis=0)
+                    after_obs_per_chunk.append(stacked)
+                combined_after_observations[key] = np.concatenate(after_obs_per_chunk, axis=1)
+
         # Ensure dones has shape [n_steps, n_envs, 1]
         if len(combined_dones.shape) == 2:
             combined_dones = combined_dones[:, :, np.newaxis]
 
         combined_data = {
             'observations': combined_observations,
+            'after_observations': combined_after_observations,
             'actions': combined_actions,
             'rewards': combined_rewards,
             'dones': combined_dones,

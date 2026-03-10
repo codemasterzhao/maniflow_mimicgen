@@ -120,6 +120,19 @@ rl_training:
   critic_warmup_rollouts: 4   # Number of rollouts to warmup critic before training actor
   critic_warmup_epochs: 3     # Number of epochs per rollout during critic warmup
 
+# Dopamine dense reward configuration
+dopamine_reward:
+  enabled: false
+  model_path: "./checkpoints/three_piece_grm_merged"
+  task_description: "assemble three pieces by placing each piece into the correct slot on the base"
+  perspectives: ["incremental", "forward", "backward"]
+  sparse_reward_bonus: 10.0
+  dense_reward_scale: 1.0
+  gpu_memory_utilization: 0.85
+  inference_batch_size: 4
+  image_resize: [224, 224]
+  conda_env: "robo-dopamine"  # conda env with vLLM + torch 2.8
+
 # Training configuration
 training:
   device: "cuda:0"
