@@ -485,14 +485,43 @@ def create_maniflow_nft_trainer_from_config(cfg: OmegaConf,
         normalize_advantages=True,
     )
 
-    # 8. Create NFT trainer
+    # 8. Create dopamine reward model if configured
+    reward_model = None
+    sparse_reward_bonus = 10.0
+    dopamine_cfg = cfg.get('dopamine_reward', {})
+    if dopamine_cfg and dopamine_cfg.get('enabled', False):
+        dataset_path = cfg.get('dataset_path', None)
+        if dataset_path:
+            goal_images = load_goal_images_from_demos(dataset_path)
+        else:
+            raise ValueError("dataset_path required for dopamine_reward goal image extraction")
+
+        reward_model = DopamineRewardModel(
+            model_path=dopamine_cfg.get('model_path', './checkpoints/three_piece_grm_merged'),
+            task_description=dopamine_cfg.get('task_description', 'perform the task'),
+            goal_images=goal_images,
+            gamma=rl_config.get('gamma', 0.99),
+            perspectives=list(dopamine_cfg.get('perspectives', ['incremental', 'forward', 'backward'])),
+            sparse_reward_bonus=dopamine_cfg.get('sparse_reward_bonus', 10.0),
+            dense_reward_scale=dopamine_cfg.get('dense_reward_scale', 1.0),
+            gpu_memory_utilization=dopamine_cfg.get('gpu_memory_utilization', 0.85),
+            inference_batch_size=dopamine_cfg.get('inference_batch_size', 4),
+            image_resize=tuple(dopamine_cfg.get('image_resize', [224, 224])),
+            conda_env=dopamine_cfg.get('conda_env', 'robo-dopamine'),
+        )
+        sparse_reward_bonus = dopamine_cfg.get('sparse_reward_bonus', 10.0)
+        print(f"Dopamine reward model configured for NFT (sparse_bonus={sparse_reward_bonus})")
+
+    # 9. Create NFT trainer
     trainer = ManiFlowNFTTrainer(
         policy=policy,
         env_runner=env_runner,
         config=nft_config,
         advantage_config=advantage_config,
         device=device,
-        use_wandb=True
+        use_wandb=True,
+        reward_model=reward_model,
+        sparse_reward_bonus=sparse_reward_bonus,
     )
 
     print(f"ManiFlow NFT Trainer created from config")

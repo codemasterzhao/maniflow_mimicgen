@@ -77,6 +77,19 @@ policy:
     num_points: ${policy.visual_cond_len}
     pointwise: true
 
+# Dopamine dense reward configuration
+dopamine_reward:
+  enabled: false
+  model_path: "./checkpoints/three_piece_grm_merged"
+  task_description: "assemble three pieces by placing each piece into the correct slot on the base"
+  perspectives: ["incremental", "forward", "backward"]
+  sparse_reward_bonus: 10.0
+  dense_reward_scale: 1.0
+  gpu_memory_utilization: 0.85
+  inference_batch_size: 4
+  image_resize: [224, 224]
+  conda_env: "robo-dopamine"
+
 # RL Training Configuration (NFT)
 rl_training:
   # Trainer type: "nft" to use ManiFlowNFTTrainer
