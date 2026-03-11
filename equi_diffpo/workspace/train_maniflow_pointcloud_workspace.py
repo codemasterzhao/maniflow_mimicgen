@@ -71,6 +71,10 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
+        # configure optimizer (before resume so checkpoint can restore optimizer state)
+        self.optimizer = hydra.utils.instantiate(
+            cfg.optimizer, params=self.model.parameters())
+
         # resume training
         if cfg.training.resume:
             lastest_ckpt_path = self.get_checkpoint_path()
@@ -94,10 +98,6 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
-
-        # configure optimizer
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
