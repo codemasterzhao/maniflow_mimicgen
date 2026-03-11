@@ -147,7 +147,7 @@ class DopamineRewardModel:
 
         # Build subprocess command
         cmd = [
-            "conda", "run", "-n", self.conda_env,
+            os.path.expanduser("~/miniforge3/bin/conda"), "run", "-n", self.conda_env,
             "python", "-u", self.worker_script,
             "--input_path", input_path,
             "--output_path", output_path,

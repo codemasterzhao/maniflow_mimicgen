@@ -46,7 +46,8 @@ class NFTConfig:
     adv_clip_max: float = 5.0      # Advantage clipping range
     num_train_timesteps: int = 1   # Number of timesteps to sample per training step
     old_model_decay: float = 0.5   # Max EMA decay for old_model
-    old_model_decay_rate: float = 0.001  # Decay ramp-up rate
+    old_model_decay_rate: float = 0.0  # Decay ramp-up rate (0 = auto-compute from total training steps)
+    n_train_epochs: int = 3  # Number of training epochs per rollout
 
     # Critic
     value_coef: float = 0.5
@@ -66,8 +67,8 @@ class NFTConfig:
 
     # Logging
     log_interval: int = 10
-    save_interval: int = 100
-    eval_interval: int = 3
+    save_interval: int = 5
+    eval_interval: int = 1
     wandb_project: str = "maniflow_rl"
     wandb_run_name: str = "nft_training"
 
@@ -82,6 +83,7 @@ class NFTConfig:
     # Paths
     save_path: str = "checkpoints/maniflow_nft"
     log_path: str = "logs/maniflow_nft"
+    resume_checkpoint: str = ""  # Path to checkpoint to resume from
 
     def __post_init__(self):
         Path(self.save_path).mkdir(parents=True, exist_ok=True)
@@ -162,6 +164,19 @@ class ManiFlowNFTTrainer:
         n_chunk_steps = math.ceil(max_steps / horizon)
         samples_per_rollout = n_chunk_steps * train_n_episodes
         total_rollouts = self.config.total_timesteps // samples_per_rollout
+
+        # Auto-compute old_model_decay_rate if not set
+        if self.config.old_model_decay_rate <= 0:
+            estimated_grad_steps_per_rollout = max(
+                (n_chunk_steps * train_n_episodes * self.config.n_train_epochs) // self.config.gradient_accumulate_every,
+                1
+            )
+            total_grad_steps = max(total_rollouts * estimated_grad_steps_per_rollout, 1)
+            self.auto_decay_rate = self.config.old_model_decay / total_grad_steps
+            print(f"  - Auto decay_rate: {self.auto_decay_rate:.6f} (total_grad_steps={total_grad_steps}, reaches max_decay={self.config.old_model_decay} at end)")
+        else:
+            self.auto_decay_rate = self.config.old_model_decay_rate
+            print(f"  - Manual decay_rate: {self.auto_decay_rate}")
 
         if self.config.lr_schedule == "linear":
             self.lr_scheduler = optim.lr_scheduler.LinearLR(
@@ -248,6 +263,10 @@ class ManiFlowNFTTrainer:
 
         start_time = time.time()
 
+        # Resume from checkpoint if specified
+        if self.config.resume_checkpoint:
+            self._load_checkpoint(self.config.resume_checkpoint)
+
         while self.global_step < self.config.total_timesteps:
             rollout_start_time = time.time()
 
@@ -326,8 +345,8 @@ class ManiFlowNFTTrainer:
             n_epochs = self.config.critic_warmup_epochs
             print(f"Running critic warmup ({n_epochs} epochs)...")
         else:
-            n_epochs = 1
-            print("Running NFT training (1 epoch)...")
+            n_epochs = self.config.n_train_epochs
+            print(f"Running NFT training ({n_epochs} epochs)...")
 
         # Keep data on CPU, move minibatches to GPU
         torch_batch = rollout_batch.to_torch(torch.device('cpu'))
@@ -572,7 +591,7 @@ class ManiFlowNFTTrainer:
 
     def _update_old_model(self):
         """EMA update of old_model toward current policy.model (like DiffusionNFT)."""
-        decay = min(self.gradient_step_count * self.config.old_model_decay_rate,
+        decay = min(self.gradient_step_count * self.auto_decay_rate,
                     self.config.old_model_decay)
         with torch.no_grad():
             for old_p, new_p in zip(self.old_model.parameters(),
@@ -656,7 +675,7 @@ class ManiFlowNFTTrainer:
                 'train/global_step': self.global_step,
                 'train/rollout_count': self.rollout_count,
                 'train/gradient_step_count': self.gradient_step_count,
-                'train/old_model_decay': min(self.gradient_step_count * self.config.old_model_decay_rate,
+                'train/old_model_decay': min(self.gradient_step_count * self.auto_decay_rate,
                                               self.config.old_model_decay),
                 'perf/fps': fps,
                 'perf/rollout_time': rollout_time,
@@ -693,6 +712,30 @@ class ManiFlowNFTTrainer:
         checkpoint_path = Path(self.config.save_path) / checkpoint_name
         torch.save(checkpoint, checkpoint_path)
         print(f"Checkpoint saved: {checkpoint_path}")
+
+    def _load_checkpoint(self, checkpoint_path: str) -> None:
+        """Load training checkpoint and resume training state."""
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.old_model.load_state_dict(checkpoint['old_model_state_dict'])
+        self.ref_model.load_state_dict(checkpoint['ref_model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        self.global_step = checkpoint['global_step']
+        self.rollout_count = checkpoint['rollout_count']
+        self.gradient_step_count = checkpoint.get('gradient_step_count', 0)
+
+        if self.lr_scheduler is not None and 'lr_scheduler_state_dict' in checkpoint:
+            self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+
+        if 'training_metrics' in checkpoint:
+            self.training_metrics = checkpoint['training_metrics']
+        if 'rollout_metrics' in checkpoint:
+            self.rollout_metrics = checkpoint['rollout_metrics']
+
+        print(f"Resumed from rollout {self.rollout_count}, global_step {self.global_step:,}, gradient_step {self.gradient_step_count}")
 
     def _run_evaluation(self) -> None:
         """Run evaluation episodes."""

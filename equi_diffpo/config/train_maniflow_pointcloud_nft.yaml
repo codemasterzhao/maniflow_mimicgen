@@ -111,7 +111,7 @@ rl_training:
   beta_kl: 0.0001            # KL regularization weight (same as DiffusionNFT)
   adv_clip_max: 5.0          # Advantage clipping range
   old_model_decay: 0.5       # Max EMA decay for old_model
-  old_model_decay_rate: 0.001  # Decay ramp-up rate per rollout
+  old_model_decay_rate: 0.0  # Decay ramp-up rate (0 = auto-compute from total steps)
 
   # Critic parameters
   value_coef: 0.5
@@ -126,9 +126,9 @@ rl_training:
   warmup_steps: 10000
 
   # Logging and checkpointing
-  eval_interval: 3
+  eval_interval: 1
   log_interval: 10
-  save_interval: 100
+  save_interval: 5
 
   # Rollout video logging
   rollout_video_interval: 20
