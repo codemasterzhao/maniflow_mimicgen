@@ -12,6 +12,7 @@ from equi_diffpo.common.model_util import print_params
 from equi_diffpo.model.vision_3d.pointnet_extractor import DP3Encoder
 from equi_diffpo.model.diffusion.ditx import DiTX
 from equi_diffpo.model.common.sample_util import *
+from equi_diffpo.common.se3_utils import action_10d_to_7d, action_7d_to_10d
 torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
@@ -53,6 +54,8 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
             # canonicalization for SE(3) symmetry
             use_canonicalization=False,
             canonicalization_mode="se3",  # "se3" (rotation+translation) or "translation_only"
+            # manifold flow: work in 7D Lie algebra [pos(3), axis_angle(3), gripper(1)]
+            use_manifold_flow=False,
             **kwargs):
         super().__init__()
 
@@ -84,12 +87,20 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
             raise ValueError(f"Unsupported encoder type {encoder_type}")
         cprint(f"[Encoder_type] {encoder_type}", "yellow")
        
+        # Manifold flow: network operates in 7D Lie algebra space
+        self.use_manifold_flow = use_manifold_flow
+        if self.use_manifold_flow:
+            model_action_dim = 7  # [pos(3), axis_angle(3), gripper(1)]
+            cprint(f"[ManiFlowPolicy] Manifold flow: network dim = 7D (Lie algebra)", "cyan")
+        else:
+            model_action_dim = action_dim
+
         # create ManiFlow model
         obs_feature_dim = obs_encoder.output_shape()
-        input_dim = action_dim + obs_feature_dim
+        input_dim = model_action_dim + obs_feature_dim
         global_cond_dim = None
         if obs_as_global_cond:
-            input_dim = action_dim
+            input_dim = model_action_dim
             global_cond_dim = obs_feature_dim
 
         self.use_pc_color = use_pc_color
@@ -100,7 +111,7 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         cprint(f"[ManiFlowTransformerPointcloudPolicy] Using DiTX model", "red")
         model = DiTX(
             input_dim=input_dim,
-            output_dim=action_dim,
+            output_dim=model_action_dim,
             horizon=horizon,
             n_obs_steps=n_obs_steps,
             cond_dim=global_cond_dim,
@@ -124,6 +135,7 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         self.horizon = horizon
         self.obs_feature_dim = obs_feature_dim
         self.action_dim = action_dim
+        self.model_action_dim = model_action_dim
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
@@ -166,6 +178,8 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         cprint(f"  - sample_target_t_mode: {self.sample_target_t_mode}", "yellow")
         cprint(f"  - use_canonicalization: {self.use_canonicalization}", "yellow")
         cprint(f"  - canonicalization_mode: {self.canonicalization_mode}", "yellow")
+        cprint(f"  - use_manifold_flow: {self.use_manifold_flow}", "yellow")
+        cprint(f"  - model_action_dim: {self.model_action_dim}", "yellow")
 
         print_params(self)
 
@@ -339,7 +353,8 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         value = next(iter(nobs.values()))
         B, To = value.shape[:2]
         T = self.horizon
-        Da = self.action_dim
+        Da = self.action_dim         # 10D (environment action dim)
+        Dm = self.model_action_dim   # 7D if manifold, 10D otherwise
         Do = self.obs_feature_dim
         To = self.n_obs_steps
 
@@ -352,32 +367,37 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         lang_cond = None
 
         if self.language_conditioned:
-            # assume nobs has 'task_name' key for language condition
             lang_cond = nobs.get('task_name', None)
             assert lang_cond is not None, "Language goal is required"
 
         # condition through visual feature
         this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]).to(device))
         nobs_features = self.obs_encoder(this_nobs)
-        vis_cond = nobs_features.reshape(B, -1, Do) # B, self.n_obs_steps*L, Do
-        # empty data for action
-        cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
+        vis_cond = nobs_features.reshape(B, -1, Do)
 
-        # run sampling
+        # ODE sampling in model_action_dim (7D if manifold, 10D otherwise)
+        cond_data = torch.zeros(size=(B, T, Dm), device=device, dtype=dtype)
+
         nsample = self.conditional_sample(
             cond_data,
             vis_cond=vis_cond,
             lang_cond=lang_cond,
             **self.kwargs)
 
-        # unnormalize prediction
-        naction_pred = nsample[...,:Da]
-        action_pred = self.normalizer['action'].unnormalize(naction_pred)
+        if self.use_manifold_flow:
+            # ODE output is 7D normalized. Unnormalize in 10D:
+            # Convert 7D -> 10D (exp_so3 on axis-angle part), then unnormalize
+            nsample_7d = nsample[..., :Dm]
+            nsample_10d = action_7d_to_10d(nsample_7d)
+            action_pred = self.normalizer['action'].unnormalize(nsample_10d)
+        else:
+            naction_pred = nsample[..., :Da]
+            action_pred = self.normalizer['action'].unnormalize(naction_pred)
 
         # get action
         start = To - 1
         end = start + self.n_action_steps
-        action = action_pred[:,start:end]
+        action = action_pred[:, start:end]
 
         # Uncanonicalize: transform action back to world frame
         if self.use_canonicalization:
@@ -649,9 +669,13 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action']).to(self.device)
 
+        # Manifold flow: convert normalized 10D -> 7D for flow matching
+        if self.use_manifold_flow:
+            nactions = action_10d_to_7d(nactions)
+
         if not self.use_pc_color:
             nobs['point_cloud'] = nobs['point_cloud'][..., :3]
-        
+
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
 
