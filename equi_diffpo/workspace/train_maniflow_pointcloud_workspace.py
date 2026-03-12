@@ -99,6 +99,12 @@ class TrainManiFlowPointcloudWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
 
+        # Set initial_lr for resumed optimizer (required by LambdaLR when last_epoch != -1)
+        if self.global_step > 0:
+            for param_group in self.optimizer.param_groups:
+                if "initial_lr" not in param_group:
+                    param_group["initial_lr"] = param_group["lr"]
+
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
