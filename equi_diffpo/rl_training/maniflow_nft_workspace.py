@@ -47,7 +47,7 @@ class NFTConfig:
     num_train_timesteps: int = 1   # Number of timesteps to sample per training step
     old_model_decay: float = 0.5   # Max EMA decay for old_model
     old_model_decay_rate: float = 0.0  # Decay ramp-up rate (0 = auto-compute from total training steps)
-    n_train_epochs: int = 3  # Number of training epochs per rollout
+    n_train_epochs: int = 1  # Number of training epochs per rollout
 
     # Critic
     value_coef: float = 0.5
