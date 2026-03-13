@@ -1,4 +1,5 @@
 from typing import Dict, Tuple
+import math
 import torch
 import torch.nn.functional as F
 from einops import reduce
@@ -306,6 +307,24 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         return torch.cat([pos_world, rot6d_world, gripper], dim=-1)
 
     # ========= inference  ============
+
+    def sample_manifold_noise(self, shape, dtype, device):
+        """
+        Sample noise with SO(3)-uniform prior for rotation dims (3:6).
+        Other dims (pos, gripper) use standard Gaussian.
+        """
+        noise = torch.randn(size=shape, dtype=dtype, device=device)
+        if self.use_manifold_flow:
+            B_dims = shape[:-1]
+            # Uniform direction on S^2
+            axis = torch.randn(*B_dims, 3, dtype=dtype, device=device)
+            axis = axis / (axis.norm(dim=-1, keepdim=True) + 1e-8)
+            # SO(3) Haar measure: p(theta) ~ (1-cos(theta)), theta in [0, pi]
+            u = torch.rand(*B_dims, 1, dtype=dtype, device=device)
+            angle = torch.acos(1 - 2 * u)  # inverse CDF
+            noise[..., 3:6] = axis * angle
+        return noise
+
     def conditional_sample(self, 
             condition_data, 
             vis_cond=None,
@@ -313,11 +332,10 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
             **kwargs
             ):
         
-        noise = torch.randn(
-            size=condition_data.shape, 
+        noise = self.sample_manifold_noise(
+            shape=condition_data.shape,
             dtype=condition_data.dtype,
-            device=condition_data.device,
-            generator=None)
+            device=condition_data.device)
         
         ode_traj = self.sample_ode(
             x0 = noise, 
@@ -547,7 +565,7 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
         
         # compute interpolated data points at t and predict flow velocity
         # Note: With RL convention, x_1_flow is noise (t=1), x_0_flow is data (t=0)
-        x_1_flow = torch.randn_like(actions, device=device)  # noise at t=1
+        x_1_flow = self.sample_manifold_noise(actions.shape, actions.dtype, device)  # noise at t=1
         x_0_flow = actions.to(device)                        # data at t=0
         x_t_flow = self.linear_interpolate(x_1_flow, x_0_flow, t_flow, epsilon=0.0)
         v_t_flow = x_1_flow-x_0_flow  # velocity: noise → data (t=1 → t=0)
