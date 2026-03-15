@@ -156,6 +156,9 @@ def create_maniflow_rl_trainer_from_config(cfg: OmegaConf,
         train_n_episodes=rl_config.get('train_n_episodes', 50),
         eval_n_episodes=rl_config.get('eval_n_episodes', 50),
 
+        # Training epochs per rollout
+        n_train_epochs=rl_config.get("n_train_epochs", 1),
+
         # Environment parameters (from task config)
         action_chunk_size=cfg.get('n_action_steps', 8),
         obs_chunk_size=cfg.get('n_obs_steps', 2),
@@ -471,6 +474,9 @@ def create_maniflow_nft_trainer_from_config(cfg: OmegaConf,
         # Episode counts
         train_n_episodes=rl_config.get('train_n_episodes', 50),
         eval_n_episodes=rl_config.get('eval_n_episodes', 50),
+
+        # Training epochs per rollout
+        n_train_epochs=rl_config.get("n_train_epochs", 1),
 
         # Environment parameters
         action_chunk_size=cfg.get('n_action_steps', 8),

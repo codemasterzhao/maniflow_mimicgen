@@ -136,6 +136,7 @@ rl_training:
 
   # Episode counts
   train_n_episodes: 500
+  n_train_epochs: 1
   eval_n_episodes: 50
 
   # Critic warmup (train value head before actor)

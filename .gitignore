@@ -157,3 +157,4 @@ all_xyz.png
 equi_diffpo/data
 data
 run_manifold_train.sh
+run_nft_*.sh
