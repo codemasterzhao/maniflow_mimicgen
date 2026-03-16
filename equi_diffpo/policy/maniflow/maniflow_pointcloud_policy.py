@@ -310,19 +310,19 @@ class ManiFlowTransformerPointcloudPolicy(BaseImagePolicy):
 
     def sample_manifold_noise(self, shape, dtype, device):
         """
-        Sample noise with SO(3)-uniform prior for rotation dims (3:6).
+        Sample noise with truncated Gaussian for rotation dims (3:6).
+        Rotation dims use standard Gaussian but clipped to pi-ball,
+        keeping density concentrated near origin (matching data distribution)
+        while avoiding axis-angle magnitude > pi.
         Other dims (pos, gripper) use standard Gaussian.
         """
         noise = torch.randn(size=shape, dtype=dtype, device=device)
         if self.use_manifold_flow:
-            B_dims = shape[:-1]
-            # Uniform direction on S^2
-            axis = torch.randn(*B_dims, 3, dtype=dtype, device=device)
-            axis = axis / (axis.norm(dim=-1, keepdim=True) + 1e-8)
-            # SO(3) Haar measure: p(theta) ~ (1-cos(theta)), theta in [0, pi]
-            u = torch.rand(*B_dims, 1, dtype=dtype, device=device)
-            angle = torch.acos(1 - 2 * u)  # inverse CDF
-            noise[..., 3:6] = axis * angle
+            rot_noise = noise[..., 3:6]
+            norm = rot_noise.norm(dim=-1, keepdim=True)
+            # Rescale any samples with ||v|| > pi to have ||v|| = pi
+            rot_noise = rot_noise * (torch.clamp(norm, max=math.pi) / (norm + 1e-8))
+            noise[..., 3:6] = rot_noise
         return noise
 
     def conditional_sample(self, 
