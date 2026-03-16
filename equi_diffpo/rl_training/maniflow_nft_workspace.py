@@ -165,15 +165,10 @@ class ManiFlowNFTTrainer:
         samples_per_rollout = n_chunk_steps * train_n_episodes
         total_rollouts = self.config.total_timesteps // samples_per_rollout
 
-        # Auto-compute old_model_decay_rate if not set
+        # Auto-compute old_model_decay_rate if not set (per-rollout, matching DiffusionNFT)
         if self.config.old_model_decay_rate <= 0:
-            estimated_grad_steps_per_rollout = max(
-                (n_chunk_steps * train_n_episodes * self.config.n_train_epochs) // self.config.gradient_accumulate_every,
-                1
-            )
-            total_grad_steps = max(total_rollouts * estimated_grad_steps_per_rollout, 1)
-            self.auto_decay_rate = self.config.old_model_decay / total_grad_steps
-            print(f"  - Auto decay_rate: {self.auto_decay_rate:.6f} (total_grad_steps={total_grad_steps}, reaches max_decay={self.config.old_model_decay} at end)")
+            self.auto_decay_rate = self.config.old_model_decay / max(total_rollouts, 1)
+            print(f"  - Auto decay_rate: {self.auto_decay_rate:.6f} (total_rollouts={total_rollouts}, reaches max_decay={self.config.old_model_decay} at end)")
         else:
             self.auto_decay_rate = self.config.old_model_decay_rate
             print(f"  - Manual decay_rate: {self.auto_decay_rate}")
@@ -591,7 +586,7 @@ class ManiFlowNFTTrainer:
 
     def _update_old_model(self):
         """EMA update of old_model toward current policy.model (like DiffusionNFT)."""
-        decay = min(self.gradient_step_count * self.auto_decay_rate,
+        decay = min(self.rollout_count * self.auto_decay_rate,
                     self.config.old_model_decay)
         with torch.no_grad():
             for old_p, new_p in zip(self.old_model.parameters(),
