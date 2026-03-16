@@ -202,8 +202,7 @@ def main(cfg: DictConfig) -> None:
         validate_config(cfg)
         output_dir = setup_output_directories(cfg)
 
-        # Initialize wandb if configured
-        setup_wandb(cfg)
+        # Note: wandb is initialized by the trainer (PPO/NFT) with correct run name
 
         # Determine device
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
