@@ -306,6 +306,9 @@ class ManiFlowNFTTrainer:
             critic_only = self.rollout_count < self.config.critic_warmup_rollouts
             training_stats = self.run_nft_training(rollout_batch, critic_only=critic_only)
 
+            # Stage 4: Update old_model with EMA decay
+            if not critic_only:
+                self._update_old_model()
 
             # Update global step
             self.global_step += actual_samples
@@ -381,8 +384,9 @@ class ManiFlowNFTTrainer:
                 # Compute NFT loss
                 loss_dict = self._compute_nft_loss(mini_batch, critic_only=critic_only)
 
-                # Scale loss for gradient accumulation (divide by accumulate steps)
-                scaled_loss = loss_dict["total_loss"] / accumulate_steps
+                # Scale loss for gradient accumulation
+                weight = actual_batch_size / total_samples
+                scaled_loss = loss_dict["total_loss"] * weight
                 scaled_loss.backward()
 
                 accumulated_count += 1
@@ -402,9 +406,6 @@ class ManiFlowNFTTrainer:
                     num_updates += 1
                     self.gradient_step_count += 1
                     accumulated_count = 0
-                    # Update old_model EMA after each optimizer step
-                    if not critic_only:
-                        self._update_old_model()
 
             if critic_only and n_epochs > 1:
                 epoch_value_loss = stats['value_loss'] / num_minibatches if num_minibatches > 0 else 0
@@ -420,9 +421,6 @@ class ManiFlowNFTTrainer:
             self.optimizer.zero_grad()
             num_updates += 1
             self.gradient_step_count += 1
-            # Update old_model EMA after remaining optimizer step
-            if not critic_only:
-                self._update_old_model()
 
         # Average statistics
         for key in stats.keys():
@@ -438,8 +436,6 @@ class ManiFlowNFTTrainer:
         print(f"    - Policy loss: {stats['policy_loss']:.6f}")
         print(f"    - Value loss: {stats['value_loss']:.6f}")
         print(f"    - KL loss: {stats['kl_loss']:.6f}")
-        current_decay = min(self.gradient_step_count * self.auto_decay_rate, self.config.old_model_decay)
-        print(f"    - Old model decay: {current_decay:.4f} (step {self.gradient_step_count})")
 
         return stats
 
@@ -601,6 +597,7 @@ class ManiFlowNFTTrainer:
             for old_p, new_p in zip(self.old_model.parameters(),
                                     self.policy.model.parameters()):
                 old_p.data.copy_(decay * old_p.data + (1 - decay) * new_p.data)
+        print(f"  Old model updated (decay={decay:.4f})")
 
     def _flatten_batch_data(self, torch_batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Flatten rollout batch for minibatch training. Data stays on CPU."""
